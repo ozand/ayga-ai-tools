@@ -2,6 +2,7 @@
     'use strict';
 
     const bridge = globalThis.AygaArtifactBridge;
+    const downloader = globalThis.AygaArtifactDownload;
     if (!bridge || location.origin !== 'https://claude.ai' || window.top !== window) return;
     if (!location.pathname.startsWith('/code/artifact/')) return;
 
@@ -36,6 +37,12 @@
         const request = bridge.makeRequest(nextRequestId());
         let timer;
         let settled = false;
+        let resolve;
+        let reject;
+        const promise = new Promise((resolvePromise, rejectPromise) => {
+            resolve = resolvePromise;
+            reject = rejectPromise;
+        });
         const onMessage = (event) => {
             if (settled || event.source !== current.source || event.origin !== current.origin) return;
             if (!bridge.isValidResponse(event.data, request.requestId)) return;
@@ -45,12 +52,6 @@
             activeRequest = null;
             resolve(event.data.result);
         };
-        let resolve;
-        let reject;
-        const promise = new Promise((resolvePromise, rejectPromise) => {
-            resolve = resolvePromise;
-            reject = rejectPromise;
-        });
         const cancel = () => {
             if (settled) return;
             settled = true;
@@ -91,6 +92,41 @@
         status.style.background = isError ? '#9b1c1c' : '#202123';
     }
 
+    function handleExportResult(result) {
+        if (!result || typeof result !== 'object' || !result.ok) {
+            const msg = (result && (result.message || result.code)) || 'Export failed.';
+            showStatus(msg, true);
+            return false;
+        }
+
+        const markdown = result.markdown;
+        if (typeof markdown !== 'string' || !markdown.trim()) {
+            const msg = result.message || 'No exportable Markdown content found.';
+            showStatus(msg, true);
+            return false;
+        }
+
+        if (!downloader || typeof downloader.downloadMarkdownArtifact !== 'function') {
+            showStatus('Download module is unavailable.', true);
+            return false;
+        }
+
+        const downloadOutcome = downloader.downloadMarkdownArtifact(markdown, {
+            metadata: result.metadata,
+            document,
+            URL: typeof window !== 'undefined' && window.URL ? window.URL : (typeof URL !== 'undefined' ? URL : undefined),
+            Blob: typeof window !== 'undefined' && window.Blob ? window.Blob : (typeof Blob !== 'undefined' ? Blob : undefined)
+        });
+
+        if (!downloadOutcome.ok) {
+            showStatus(downloadOutcome.error || 'Failed to download Markdown file.', true);
+            return false;
+        }
+
+        showStatus(`Exported ${downloadOutcome.filename}`, false);
+        return true;
+    }
+
     function addExportControl() {
         if (!document.body || document.querySelector('[data-ayga-artifact-export]')) return;
         const button = document.createElement('button');
@@ -102,7 +138,7 @@
             button.disabled = true;
             try {
                 const result = await requestArtifactExport();
-                showStatus(result.ok ? 'Artifact source detected.' : result.message || result.code, !result.ok);
+                handleExportResult(result);
             } catch (error) {
                 showStatus(error.message, true);
             } finally {

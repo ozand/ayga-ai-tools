@@ -4,7 +4,7 @@
   "description": "Deterministic checks and tooling for Claude Artifact export.",
   "type": "module",
   "scripts": {
-    "test": "node --test test/artifact-dom-map.test.js test/artifact-bridge.test.js test/artifact-converter.test.js"
+    "test": "node --test test/artifact-dom-map.test.js test/artifact-bridge.test.js test/artifact-converter.test.js test/artifact-download.test.js"
   },
   "license": "Apache-2.0"
 }

@@ -28,7 +28,7 @@
         {
             "run_at": "document_end",
             "matches": ["https://claude.ai/code/artifact/*"],
-            "js": ["utils/artifact-bridge.js", "artifact-shell.js"]
+            "js": ["utils/artifact-download.js", "utils/artifact-bridge.js", "artifact-shell.js"]
         }
     ],
     "web_accessible_resources": [
