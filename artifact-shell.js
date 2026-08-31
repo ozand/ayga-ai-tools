@@ -97,7 +97,7 @@
         button.type = 'button';
         button.dataset.aygaArtifactExport = 'true';
         button.textContent = 'Export Artifact';
-        button.style.cssText = 'position:fixed;right:16px;top:16px;z-index:2147483647;padding:8px 12px;border:1px solid #777;border-radius:6px;background:#fff;color:#111;font:13px sans-serif;cursor:pointer;';
+        button.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:2147483647;padding:8px 12px;border:1px solid #777;border-radius:6px;background:#fff;color:#111;font:13px sans-serif;cursor:pointer;';
         button.addEventListener('click', async () => {
             button.disabled = true;
             try {
