@@ -143,6 +143,27 @@ class SimpleElement extends SimpleNode {
 
     matches(selector) {
         const sel = selector.trim();
+        // Attribute selector [data-foo] or [data-foo="bar"] or [role="button"]
+        const attrMatch = sel.match(/^\[([a-zA-Z0-9_-]+)(?:=["']([^"']*)["'])?\]$/);
+        if (attrMatch) {
+            const attrName = attrMatch[1];
+            const attrVal = attrMatch[2];
+            if (attrVal !== undefined) {
+                return this.getAttribute(attrName) === attrVal;
+            }
+            return this.hasAttribute(attrName);
+        }
+        // Tag with attribute selector tag[attr] or tag[attr="val"]
+        const tagAttrMatch = sel.match(/^([a-zA-Z0-9-]+)\[([a-zA-Z0-9_-]+)(?:=["']([^"']*)["'])?\]$/);
+        if (tagAttrMatch) {
+            if (this.tagName.toLowerCase() !== tagAttrMatch[1].toLowerCase()) return false;
+            const attrName = tagAttrMatch[2];
+            const attrVal = tagAttrMatch[3];
+            if (attrVal !== undefined) {
+                return this.getAttribute(attrName) === attrVal;
+            }
+            return this.hasAttribute(attrName);
+        }
         // Tag selector
         if (/^[a-zA-Z0-9-]+$/.test(sel)) {
             return this.tagName.toLowerCase() === sel.toLowerCase();
@@ -154,16 +175,6 @@ class SimpleElement extends SimpleNode {
         // ID selector #foo
         if (/^#[a-zA-Z0-9_-]+$/.test(sel)) {
             return this.getAttribute('id') === sel.slice(1);
-        }
-        // Attribute selector [data-foo] or [data-foo="bar"]
-        const attrMatch = sel.match(/^\[([a-zA-Z0-9_-]+)(?:=["']([^"']*)["'])?\]$/);
-        if (attrMatch) {
-            const attrName = attrMatch[1];
-            const attrVal = attrMatch[2];
-            if (attrVal !== undefined) {
-                return this.getAttribute(attrName) === attrVal;
-            }
-            return this.hasAttribute(attrName);
         }
         // Compound tag.class
         const tagClassMatch = sel.match(/^([a-zA-Z0-9-]+)\.([a-zA-Z0-9_-]+)$/);

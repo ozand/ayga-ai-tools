@@ -2,20 +2,47 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { parseHTML } from './simple-dom.js';
-import {
-    convertDomToMarkdown,
-    createSafeFence,
-    extractCodeLanguage,
-    sanitizeUrl,
-    shouldExcludeElement,
-    MAX_MARKDOWN_CHARS
-} from '../utils/artifact-converter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const fixturesDir = path.join(__dirname, 'fixtures');
+const rootDir = path.join(__dirname, '..');
+
+function loadConverter() {
+    const code = fs.readFileSync(path.join(rootDir, 'utils', 'artifact-converter.js'), 'utf8');
+    const context = {
+        globalThis: {},
+        URL: globalThis.URL,
+        URLSearchParams: globalThis.URLSearchParams,
+        Set: globalThis.Set,
+        Map: globalThis.Map,
+        RegExp: globalThis.RegExp,
+        String: globalThis.String,
+        Number: globalThis.Number,
+        Boolean: globalThis.Boolean,
+        Object: globalThis.Object,
+        Array: globalThis.Array,
+        console: globalThis.console
+    };
+    vm.runInNewContext(code, context);
+    return context.globalThis.AygaArtifactConverter;
+}
+
+const converter = loadConverter();
+const {
+    convertDomToMarkdown,
+    createSafeFence,
+    escapeInlineCode,
+    sanitizeUrl,
+    isSafeUrl,
+    shouldExcludeElement,
+    MAX_MARKDOWN_CHARS,
+    MAX_DOM_DEPTH,
+    MAX_DOM_NODES
+} = converter;
 
 function loadFixture(filename) {
     return fs.readFileSync(path.join(fixturesDir, filename), 'utf8');
@@ -28,44 +55,33 @@ test('Dynamic fence calculation handles varying backtick runs', () => {
     assert.equal(createSafeFence('code with ``` and ````'), '`````');
 });
 
-test('Language extraction identifies standard language classes and data attributes', () => {
-    const dom1 = parseHTML('<code class="language-typescript">code</code>');
-    assert.equal(extractCodeLanguage(dom1.querySelector('code')), 'typescript');
-
-    const dom2 = parseHTML('<code class="lang-python">code</code>');
-    assert.equal(extractCodeLanguage(dom2.querySelector('code')), 'python');
-
-    const dom3 = parseHTML('<code data-language="rust">code</code>');
-    assert.equal(extractCodeLanguage(dom3.querySelector('code')), 'rust');
-
-    const dom4 = parseHTML('<code data-lang="csharp">code</code>');
-    assert.equal(extractCodeLanguage(dom4.querySelector('code')), 'csharp');
-
-    const dom5 = parseHTML('<code>plain code</code>');
-    assert.equal(extractCodeLanguage(dom5.querySelector('code')), '');
-
-    const dom6 = parseHTML('<code class="language-invalid$char*">invalid</code>');
-    assert.equal(extractCodeLanguage(dom6.querySelector('code')), '');
+test('Inline code escaping handles arbitrary backtick runs', () => {
+    assert.equal(escapeInlineCode('simple'), '`simple`');
+    assert.equal(escapeInlineCode('foo `bar` baz'), '``foo `bar` baz``');
+    assert.equal(escapeInlineCode('foo ``bar`` baz'), '```foo ``bar`` baz```');
+    assert.equal(escapeInlineCode('`leading'), '`` `leading ``');
+    assert.equal(escapeInlineCode('trailing`'), '`` trailing` ``');
+    assert.equal(escapeInlineCode('`both`'), '`` `both` ``');
 });
 
-test('URL sanitizer accepts safe protocols and rejects javascript/data/blob/tokens', () => {
+test('URL sanitizer accepts safe protocols and rejects sensitive params / unsafe schemes', () => {
     assert.equal(sanitizeUrl('https://example.com/page'), 'https://example.com/page');
     assert.equal(sanitizeUrl('http://example.com/page'), 'http://example.com/page');
     assert.equal(sanitizeUrl('mailto:user@example.com'), 'mailto:user@example.com');
     assert.equal(sanitizeUrl('/relative/path'), '/relative/path');
     assert.equal(sanitizeUrl('#section-1'), '#section-1');
 
+    // Sensitive query parameters stripped
+    assert.equal(sanitizeUrl('https://example.com/page?token=secret123&keep=1'), 'https://example.com/page?keep=1');
+    assert.equal(sanitizeUrl('/relative/path?auth_token=abc&page=2'), '/relative/path?page=2');
+    assert.equal(sanitizeUrl('/relative/path#token=sensitive'), '/relative/path');
+    assert.equal(sanitizeUrl('/relative/path?apiKey=key1&token=tok2'), '/relative/path');
+
     // Unsafe schemes
     assert.equal(sanitizeUrl('javascript:alert(1)'), null);
     assert.equal(sanitizeUrl('data:text/html,test'), null);
     assert.equal(sanitizeUrl('blob:https://claude.ai/uuid'), null);
     assert.equal(sanitizeUrl('vbscript:msgbox(1)'), null);
-
-    // Claude frame tokens and auth query params
-    assert.equal(sanitizeUrl('https://abc-123.frame.claudeusercontent.com/frame?token=xyz'), null);
-    assert.equal(sanitizeUrl('https://claudeusercontent.com/something?auth=123'), null);
-    assert.equal(sanitizeUrl('https://example.com/api?access_token=secret'), null);
-    assert.equal(sanitizeUrl('https://example.com/api?jwt=secret.payload.sig'), null);
 });
 
 test('Element exclusion correctly flags untrusted, hidden, and service UI elements', () => {
@@ -76,10 +92,12 @@ test('Element exclusion correctly flags untrusted, hidden, and service UI elemen
         <template><p>temp</p></template>
         <div aria-hidden="true">hidden</div>
         <div hidden>hidden2</div>
-        <div style="display:none">hidden3</div>
-        <div style="visibility: hidden">hidden4</div>
+        <div inert>hidden3</div>
+        <div role="navigation">nav</div>
+        <div role="banner">hdr</div>
+        <div style="display:none">hidden4</div>
+        <div style="visibility: hidden">hidden5</div>
         <button class="copy-button">Copy</button>
-        <div class="sr-only">Accessibility label</div>
         <p>Safe content</p>
     `);
 
@@ -152,19 +170,31 @@ test('Converts explicit Mermaid source node to mermaid code fence', () => {
     assert.equal(result.metadata.hasSvgOnlyMermaid, false);
 });
 
-test('Handles rendered SVG-only Mermaid with neutral marker and warning without leaking', () => {
-    const html = loadFixture('artifact-frame-rendered-mermaid-svg-only.html');
-    const dom = parseHTML(html);
-    const root = dom.querySelector('.artifact-content');
+test('Mermaid SVG-only detection is independent of DOM order', () => {
+    // 1. Rendered SVG alone
+    const htmlSvgOnly = loadFixture('artifact-frame-rendered-mermaid-svg-only.html');
+    const domSvgOnly = parseHTML(htmlSvgOnly);
+    const resSvgOnly = convertDomToMarkdown(domSvgOnly.querySelector('.artifact-content'));
+    assert.equal(resSvgOnly.metadata.hasSvgOnlyMermaid, true);
+    assert.equal(resSvgOnly.metadata.hasMermaidSource, false);
+    assert.ok(resSvgOnly.warnings[0].includes('Mermaid source is unavailable'));
+    assert.ok(resSvgOnly.markdown.includes('> [!WARNING]\n> Mermaid source is unavailable'));
 
-    const result = convertDomToMarkdown(root, { document: dom });
-    assert.ok(result.markdown.includes('<!-- [Mermaid diagram: source code unavailable; rendered vector graphic omitted] -->'));
-    assert.equal(result.metadata.hasSvgOnlyMermaid, true);
-    assert.equal(result.warnings.length, 1);
-    assert.ok(result.warnings[0].includes('Mermaid diagram source code was unavailable'));
-    // Ensure no SVG text/ids leaked into raw diagram fences
-    assert.ok(!result.markdown.includes('```mermaid'));
-    assert.ok(!result.markdown.includes('flowchart-A-0'));
+    // 2. Rendered SVG positioned BEFORE explicit source in DOM
+    const htmlSvgBeforeSource = `
+      <div class="artifact-content">
+        <div class="mermaid-viewer">
+          <svg id="claude-mermaid-0"><g><text>Rendered</text></g></svg>
+        </div>
+        <pre><code class="language-mermaid">graph TD\nA --> B</code></pre>
+      </div>
+    `;
+    const domSvgBefore = parseHTML(htmlSvgBeforeSource);
+    const resSvgBefore = convertDomToMarkdown(domSvgBefore.querySelector('.artifact-content'));
+    assert.equal(resSvgBefore.metadata.hasSvgOnlyMermaid, false);
+    assert.equal(resSvgBefore.metadata.hasMermaidSource, true);
+    assert.ok(resSvgBefore.markdown.includes('```mermaid\ngraph TD\nA --> B\n```'));
+    assert.ok(!resSvgBefore.markdown.includes('> [!WARNING]'));
 });
 
 test('Strips untrusted, script, style, hidden, and service UI elements', () => {
@@ -205,9 +235,8 @@ test('Sanitizes tokenized URLs and unsafe schemes in security fixture', () => {
     assert.ok(result.markdown.includes('Blob URL link'));
     assert.ok(!result.markdown.includes('blob:https'));
 
-    assert.ok(result.markdown.includes('Frame Sandbox Link'));
+    // Sensitive token param stripped from URL
     assert.ok(!result.markdown.includes('secret123'));
-    assert.ok(!result.markdown.includes('.frame.claudeusercontent.com'));
 
     // Safe image preserved
     assert.ok(result.markdown.includes('![Valid Pic](https://images.example.com/pic.jpg)'));
@@ -215,7 +244,6 @@ test('Sanitizes tokenized URLs and unsafe schemes in security fixture', () => {
     // Unsafe images omitted or alt preserved safely
     assert.ok(!result.markdown.includes('javascript:alert(1)'));
     assert.ok(!result.markdown.includes('super_secret'));
-    assert.ok(!result.markdown.includes('xyz.frame.claudeusercontent.com'));
 
     // Blacklisted tags omitted
     assert.ok(!result.markdown.includes('should not execute or leak'));
@@ -225,16 +253,34 @@ test('Sanitizes tokenized URLs and unsafe schemes in security fixture', () => {
     assert.ok(!result.markdown.includes('Visibility hidden text'));
     assert.ok(!result.markdown.includes('Aria hidden service text'));
     assert.ok(!result.markdown.includes('Copy code'));
-    assert.ok(!result.markdown.includes('Screen reader helper'));
 
     assert.ok(result.markdown.includes('Normal visible trailing paragraph.'));
 });
 
-test('Enforces conversion limits (character limits)', () => {
-    // Massive string limit
-    const hugeText = 'A'.repeat(MAX_MARKDOWN_CHARS + 100);
-    const dom = parseHTML(`<p>${hugeText}</p>`);
-    const result = convertDomToMarkdown(dom.body, { document: dom });
-    assert.ok(result.markdown.length <= MAX_MARKDOWN_CHARS);
-    assert.ok(result.warnings.some(w => w.includes('Markdown output was truncated')));
+test('Enforces traversal budget and maximum DOM depth during recursion', () => {
+    // 1. Deeply nested DOM structure exceeding maxDepth
+    let deepHtml = '<span>deep leaf</span>';
+    for (let i = 0; i < 40; i++) {
+        deepHtml = `<div>${deepHtml}</div>`;
+    }
+    const domDeep = parseHTML(`<div class="artifact-content">${deepHtml}</div>`);
+    const resDeep = convertDomToMarkdown(domDeep.querySelector('.artifact-content'), { maxDepth: 10 });
+    assert.ok(resDeep.warnings.some(w => w.includes('DOM depth limit reached')));
+    assert.ok(!resDeep.markdown.includes('deep leaf'));
+
+    // 2. Large DOM structure exceeding maxNodes
+    let largeHtml = '';
+    for (let i = 0; i < 100; i++) {
+        largeHtml += `<p>Paragraph item ${i}</p>`;
+    }
+    const domLarge = parseHTML(`<div class="artifact-content">${largeHtml}</div>`);
+    const resLarge = convertDomToMarkdown(domLarge.querySelector('.artifact-content'), { maxNodes: 20 });
+    assert.ok(resLarge.warnings.some(w => w.includes('DOM traversal limit reached')));
+    assert.ok(resLarge.markdown.includes('Paragraph item 0'));
+    assert.ok(!resLarge.markdown.includes('Paragraph item 99'));
+
+    // 3. Output character budget exceeded
+    const resTrunc = convertDomToMarkdown(domLarge.querySelector('.artifact-content'), { maxChars: 50 });
+    assert.ok(resTrunc.markdown.length <= 50);
+    assert.ok(resTrunc.warnings.some(w => w.includes('limit reached')));
 });

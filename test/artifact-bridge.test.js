@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+import { parseHTML } from './simple-dom.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -21,6 +22,12 @@ function loadFrameHandler({ hostname, frameHtml = '' }) {
     const messages = [];
     const document = {
         querySelector(selector) {
+            if (selector.includes('artifact-content') || selector.includes('artifact-viewer')) {
+                if (frameHtml) {
+                    return this;
+                }
+                return null;
+            }
             if (selector.includes('language-mermaid') && frameHtml.includes('language-mermaid')) {
                 return { textContent: 'graph TD\nA --> B' };
             }
@@ -94,5 +101,126 @@ describe('Artifact bridge protocol', () => {
         assert.equal(result.code, 'MERMAID_SOURCE_UNAVAILABLE');
         assert.equal(JSON.stringify(result).includes('<svg'), false);
         assert.equal(JSON.stringify(result).includes('token='), false);
+    });
+
+    test('integration: artifact-frame valid postMessage returns converted markdown and bounds are enforced', () => {
+        const bridgeCode = fs.readFileSync(path.join(root, 'utils/artifact-bridge.js'), 'utf8');
+        const converterCode = fs.readFileSync(path.join(root, 'utils/artifact-converter.js'), 'utf8');
+        const frameCode = fs.readFileSync(path.join(root, 'artifact-frame.js'), 'utf8');
+
+        function createIntegrationFrame(htmlString, hostname = '01932b12-9c34-7a1b-8f12-3456789abcde.frame.claudeusercontent.com') {
+            const dom = parseHTML(htmlString);
+            const messages = [];
+            const listeners = [];
+            const parent = {
+                postMessage(message, targetOrigin) {
+                    messages.push({ message, targetOrigin });
+                }
+            };
+            const window = {
+                parent,
+                top: {},
+                location: { hostname },
+                addEventListener(type, callback) {
+                    if (type === 'message') listeners.push(callback);
+                },
+                postMessage() {}
+            };
+
+            const sandbox = {
+                globalThis: {},
+                window,
+                document: dom,
+                location: window.location,
+                URL,
+                URLSearchParams
+            };
+            sandbox.globalThis = sandbox;
+
+            vm.runInNewContext(converterCode, sandbox);
+            vm.runInNewContext(bridgeCode, sandbox);
+            vm.runInNewContext(frameCode, sandbox);
+
+            return {
+                bridge: sandbox.globalThis.AygaArtifactBridge,
+                messages,
+                dispatch(data, origin = 'https://claude.ai', source = parent) {
+                    listeners.forEach(l => l({ data, origin, source }));
+                }
+            };
+        }
+
+        // Test 1: Successful conversion of rich semantic content
+        const richHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head><title>Integration Artifact</title></head>
+        <body>
+            <div class="artifact-content">
+                <h1>Report Overview</h1>
+                <p>Status: **Active** with <code>sample_id = 42</code></p>
+                <div class="service-actions" role="toolbar"><button>Print</button></div>
+                <pre><code class="language-js">console.log("Safe Code");</code></pre>
+            </div>
+        </body>
+        </html>`;
+
+        const frame1 = createIntegrationFrame(richHtml);
+        const req1 = frame1.bridge.makeRequest('req-integration-1');
+        frame1.dispatch(req1);
+
+        assert.equal(frame1.messages.length, 1);
+        assert.equal(frame1.messages[0].targetOrigin, 'https://claude.ai');
+        const resp1 = frame1.messages[0].message;
+        assert.equal(frame1.bridge.isValidResponse(resp1, 'req-integration-1'), true);
+        assert.equal(resp1.result.ok, true);
+        assert.equal(resp1.result.code, 'CONVERTED_SUCCESS');
+        assert.ok(resp1.result.markdown.includes('# Report Overview'));
+        assert.ok(resp1.result.markdown.includes('`sample_id = 42`'));
+        assert.ok(!resp1.result.markdown.includes('Print'));
+
+        // Test 2: Fail-closed on missing confirmed root (no document.body fallback)
+        const unconfirmedHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head><title>Unconfirmed Shell</title></head>
+        <body>
+            <header>Claude Header Controls</header>
+            <main>Some loose text without artifact container</main>
+        </body>
+        </html>`;
+
+        const frame2 = createIntegrationFrame(unconfirmedHtml);
+        const req2 = frame2.bridge.makeRequest('req-integration-2');
+        frame2.dispatch(req2);
+
+        assert.equal(frame2.messages.length, 1);
+        const resp2 = frame2.messages[0].message;
+        assert.equal(resp2.result.ok, false);
+        assert.equal(resp2.result.code, 'NO_EXPORTABLE_SOURCE');
+        assert.equal(resp2.result.markdown, '');
+
+        // Test 3: Large content bounds enforcement in frame context
+        const largeHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head><title>Huge Artifact</title></head>
+        <body>
+            <div class="artifact-content">
+                <h1>Huge Title</h1>
+                <p>${'X'.repeat(60000)}</p>
+            </div>
+        </body>
+        </html>`;
+
+        const frame3 = createIntegrationFrame(largeHtml);
+        const req3 = frame3.bridge.makeRequest('req-integration-3');
+        frame3.dispatch(req3);
+
+        assert.equal(frame3.messages.length, 1);
+        const resp3 = frame3.messages[0].message;
+        assert.equal(resp3.result.ok, true);
+        assert.ok(resp3.result.markdown.length <= 50000);
+        assert.equal(resp3.result.warnings.some(w => w.includes('limit reached') || w.includes('truncated')), true);
     });
 });

@@ -1,41 +1,59 @@
-(function attachArtifactConverter(root) {
+// utils/artifact-converter.js - Content-script safe converter without ESM export
+
+(function initArtifactConverter(root) {
     'use strict';
 
     const MAX_MARKDOWN_CHARS = 50000;
     const MAX_DOM_DEPTH = 32;
+    const MAX_DOM_NODES = 10000;
     const MAX_WARNINGS = 50;
 
     const BLACKLISTED_TAGS = new Set([
-        'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE',
-        'CANVAS', 'IFRAME', 'OBJECT', 'EMBED', 'APPLET',
-        'FORM', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OPTGROUP',
-        'DIALOG', 'AUDIO', 'VIDEO'
+        'SCRIPT',
+        'STYLE',
+        'NOSCRIPT',
+        'TEMPLATE',
+        'IFRAME',
+        'FRAME',
+        'OBJECT',
+        'EMBED',
+        'APPLET'
     ]);
 
-    const SERVICE_CLASS_PATTERNS = [
-        /(?:^|\s)copy[-_]?button(?:\s|$)/i,
-        /(?:^|\s)service[-_]?(?:icon|ui)(?:\s|$)/i,
-        /(?:^|\s)artifact[-_]?toolbar(?:\s|$)/i,
-        /(?:^|\s)action[-_]?button(?:\s|$)/i,
-        /(?:^|\s)feedback[-_]?button(?:\s|$)/i,
-        /(?:^|\s)sr[-_]?only(?:\s|$)/i,
-        /(?:^|\s)visually[-_]?hidden(?:\s|$)/i
+    const EXCLUDED_ROLES = new Set([
+        'presentation',
+        'none',
+        'hidden',
+        'navigation',
+        'banner',
+        'search',
+        'complementary',
+        'contentinfo',
+        'toolbar'
+    ]);
+
+    const EXCLUDED_CLASS_SUBSTRINGS = [
+        'copy-button',
+        'copy-code',
+        'action-button',
+        'service-icon',
+        'tooltip',
+        'toast',
+        'popup',
+        'overlay',
+        'modal',
+        'menu-button',
+        'collapse-button',
+        'nav-bar',
+        'sidebar',
+        'toolbar'
     ];
 
     function getTagName(node) {
-        if (!node || node.nodeType !== 1) return '';
-        return (node.nodeName || node.tagName || '').toUpperCase();
-    }
-
-    function getChildNodes(node) {
-        if (!node) return [];
-        if (node.childNodes && typeof node.childNodes.length === 'number') {
-            return Array.from(node.childNodes);
-        }
-        if (Array.isArray(node.children)) {
-            return node.children;
-        }
-        return [];
+        if (!node) return '';
+        if (typeof node.tagName === 'string') return node.tagName.toUpperCase();
+        if (typeof node.nodeName === 'string') return node.nodeName.toUpperCase();
+        return '';
     }
 
     function getAttribute(node, attrName) {
@@ -44,7 +62,7 @@
             return node.getAttribute(attrName);
         }
         if (node.attributes && typeof node.attributes === 'object') {
-            return node.attributes[attrName] !== undefined ? node.attributes[attrName] : null;
+            return node.attributes[attrName] !== undefined ? String(node.attributes[attrName]) : null;
         }
         return null;
     }
@@ -52,12 +70,29 @@
     function hasAttribute(node, attrName) {
         if (!node || node.nodeType !== 1) return false;
         if (typeof node.hasAttribute === 'function') {
-            return node.hasAttribute(attrName);
+            return Boolean(node.hasAttribute(attrName));
         }
         if (node.attributes && typeof node.attributes === 'object') {
             return node.attributes[attrName] !== undefined;
         }
         return false;
+    }
+
+    function getChildNodes(node) {
+        if (!node) return [];
+        if (node.childNodes && Array.isArray(node.childNodes)) {
+            return node.childNodes;
+        }
+        if (node.childNodes && typeof node.childNodes.length === 'number') {
+            return Array.from(node.childNodes);
+        }
+        if (node.children && Array.isArray(node.children)) {
+            return node.children;
+        }
+        if (node.children && typeof node.children.length === 'number') {
+            return Array.from(node.children);
+        }
+        return [];
     }
 
     function findDescendants(node, predicate, results = []) {
@@ -80,28 +115,65 @@
 
         if (getAttribute(el, 'aria-hidden') === 'true') return true;
         if (hasAttribute(el, 'hidden')) return true;
+        if (hasAttribute(el, 'inert')) return true;
 
-        const styleAttr = getAttribute(el, 'style');
-        if (typeof styleAttr === 'string') {
-            const normalized = styleAttr.toLowerCase().replace(/\s+/g, '');
-            if (normalized.includes('display:none') || normalized.includes('visibility:hidden')) {
-                return true;
-            }
-        }
-        if (el.style && (el.style.display === 'none' || el.style.visibility === 'hidden')) {
+        const roleAttr = getAttribute(el, 'role');
+        if (roleAttr && EXCLUDED_ROLES.has(roleAttr.trim().toLowerCase())) {
             return true;
         }
 
-        const className = typeof el.className === 'string'
-            ? el.className
-            : (getAttribute(el, 'class') || '');
-        if (typeof className === 'string' && className.length > 0) {
-            if (SERVICE_CLASS_PATTERNS.some((pattern) => pattern.test(className))) {
+        const styleAttr = getAttribute(el, 'style');
+        if (styleAttr && typeof styleAttr === 'string') {
+            const normalized = styleAttr.replace(/\s+/g, '').toLowerCase();
+            if (
+                normalized.includes('display:none') ||
+                normalized.includes('visibility:hidden') ||
+                normalized.includes('opacity:0')
+            ) {
                 return true;
             }
         }
 
-        if (getAttribute(el, 'data-service-ui') === 'true' || getAttribute(el, 'data-action') === 'copy') {
+        let classString = '';
+        if (typeof el.className === 'string') {
+            classString = el.className;
+        } else if (el.classList && typeof el.classList.contains === 'function') {
+            if (Array.isArray(el.classList)) {
+                classString = el.classList.join(' ');
+            } else if (el.classList instanceof Set) {
+                classString = Array.from(el.classList).join(' ');
+            }
+        }
+        if (!classString) {
+            const classAttr = getAttribute(el, 'class');
+            if (typeof classAttr === 'string') {
+                classString = classAttr;
+            }
+        }
+
+        const lowerClass = classString.toLowerCase();
+        for (const needle of EXCLUDED_CLASS_SUBSTRINGS) {
+            if (lowerClass.includes(needle)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function isSafeUrl(rawUrl) {
+        if (typeof rawUrl !== 'string') return false;
+        const url = rawUrl.trim();
+        if (!url || url.length === 0 || url.length > 4096) return false;
+        if (/[\u0000-\u001F\u007F-\u009F]/.test(url)) return false;
+
+        const schemeMatch = url.match(/^([a-zA-Z0-9+.-]+):/);
+        if (schemeMatch) {
+            const scheme = schemeMatch[1].toLowerCase();
+            return scheme === 'http' || scheme === 'https' || scheme === 'mailto';
+        }
+
+        if (url.startsWith('//') || url.startsWith('/') || url.startsWith('./') || url.startsWith('../') || url.startsWith('#') || url.startsWith('?')) {
             return true;
         }
 
@@ -133,150 +205,174 @@
         const schemeMatch = url.match(/^([a-zA-Z0-9+.-]+):/);
         if (schemeMatch) {
             const scheme = schemeMatch[1].toLowerCase();
-            if (scheme === 'javascript' || scheme === 'data' || scheme === 'vbscript' || scheme === 'file' || scheme === 'blob') {
-                return null;
-            }
             if (scheme !== 'http' && scheme !== 'https' && scheme !== 'mailto') {
                 return null;
             }
+        } else {
+            if (
+                !url.startsWith('//') &&
+                !url.startsWith('/') &&
+                !url.startsWith('./') &&
+                !url.startsWith('../') &&
+                !url.startsWith('#') &&
+                !url.startsWith('?')
+            ) {
+                return null;
+            }
         }
 
-        if (/^https?:\/\//i.test(url)) {
-            try {
-                const parsed = new URL(url);
-                if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+        try {
+            const hasExplicitScheme = Boolean(schemeMatch);
+            const isSchemeRelative = url.startsWith('//');
+            const dummyBase = 'https://ayga-parser-base.internal';
+            const parsed = isSchemeRelative
+                ? new URL('https:' + url)
+                : (hasExplicitScheme ? new URL(url) : new URL(url, dummyBase));
 
-                if (parsed.hostname.includes('claudeusercontent.com')) {
-                    return null;
-                }
+            if (parsed.protocol === 'mailto:') {
+                return url;
+            }
 
-                // Check for sensitive auth params
-                for (const param of parsed.searchParams.keys()) {
+            if (parsed.search) {
+                const params = new URLSearchParams(parsed.search);
+                const keysToDelete = [];
+                for (const param of params.keys()) {
                     if (SENSITIVE_QUERY_PARAMS.has(param.toLowerCase())) {
-                        return null;
+                        keysToDelete.push(param);
                     }
                 }
+                for (const k of keysToDelete) {
+                    params.delete(k);
+                }
+                const newQuery = params.toString();
+                parsed.search = newQuery ? `?${newQuery}` : '';
+            }
 
-                parsed.username = '';
-                parsed.password = '';
+            if (parsed.hash) {
+                const rawHash = parsed.hash.replace(/^#\??/, '');
+                if (rawHash.includes('=')) {
+                    const hashParams = new URLSearchParams(rawHash);
+                    const keysToDelete = [];
+                    for (const param of hashParams.keys()) {
+                        if (SENSITIVE_QUERY_PARAMS.has(param.toLowerCase())) {
+                            keysToDelete.push(param);
+                        }
+                    }
+                    if (keysToDelete.length > 0) {
+                        for (const k of keysToDelete) {
+                            hashParams.delete(k);
+                        }
+                        const newHash = hashParams.toString();
+                        parsed.hash = newHash ? `#${newHash}` : '';
+                    }
+                }
+            }
+
+            if (hasExplicitScheme) {
                 return parsed.href;
-            } catch {
-                return null;
+            } else if (isSchemeRelative) {
+                return '//' + parsed.host + parsed.pathname + parsed.search + parsed.hash;
+            } else if (url.startsWith('#')) {
+                return parsed.hash;
+            } else if (url.startsWith('?')) {
+                return parsed.search + parsed.hash;
+            } else {
+                return parsed.pathname + parsed.search + parsed.hash;
             }
+        } catch {
+            return null;
         }
-
-        if (/^mailto:/i.test(url)) {
-            try {
-                const parsed = new URL(url);
-                return parsed.protocol === 'mailto:' ? parsed.href : null;
-            } catch {
-                return null;
-            }
-        }
-
-        if (url.startsWith('#') || url.startsWith('/') || url.startsWith('./') || url.startsWith('../')) {
-            return url;
-        }
-
-        if (!url.includes(':') && !url.startsWith('//')) {
-            return url;
-        }
-
-        return null;
     }
 
     function createSafeFence(codeText) {
-        if (typeof codeText !== 'string') return '```';
-        const matches = codeText.match(/`+/g);
-        let maxTicks = 2;
+        if (!codeText) return '```';
+        const matches = String(codeText).match(/`+/g);
+        let maxRun = 2;
         if (matches) {
             for (const m of matches) {
-                if (m.length > maxTicks) {
-                    maxTicks = m.length;
+                if (m.length > maxRun) {
+                    maxRun = m.length;
                 }
             }
         }
-        return '`'.repeat(maxTicks + 1);
+        return '`'.repeat(maxRun + 1);
     }
 
-    function extractCodeLanguage(element) {
-        if (!element || element.nodeType !== 1) return '';
-
-        const dataLang = getAttribute(element, 'data-language') || getAttribute(element, 'data-lang');
-        if (dataLang && typeof dataLang === 'string') {
-            const cleaned = dataLang.trim().toLowerCase();
-            if (/^[a-zA-Z0-9_+#.-]+$/.test(cleaned)) {
-                return cleaned;
+    function escapeInlineCode(codeText) {
+        if (!codeText) return '``';
+        const str = String(codeText);
+        const matches = str.match(/`+/g);
+        let maxRun = 0;
+        if (matches) {
+            for (const m of matches) {
+                if (m.length > maxRun) {
+                    maxRun = m.length;
+                }
             }
         }
-
-        const className = typeof element.className === 'string'
-            ? element.className
-            : (getAttribute(element, 'class') || '');
-
-        if (typeof className === 'string') {
-            const match = className.match(/(?:^|\s)(?:language|lang)-([a-zA-Z0-9_+#.-]+)(?:\s|$)/i);
-            if (match && /^[a-zA-Z0-9_+#.-]+$/.test(match[1])) return match[1].toLowerCase();
+        const fence = '`'.repeat(maxRun + 1);
+        if (str.startsWith('`') || str.endsWith('`')) {
+            return `${fence} ${str} ${fence}`;
         }
+        return `${fence}${str}${fence}`;
+    }
 
-        return '';
+    function sanitizeInlineAttr(text) {
+        if (!text) return '';
+        return String(text).replace(/[\r\n]+/g, ' ').replace(/["\\]/g, '\\$&').trim();
+    }
+
+    function sanitizeAltText(text) {
+        if (!text) return '';
+        return String(text).replace(/[\r\n]+/g, ' ').replace(/[\[\]\\]/g, '\\$&').trim();
     }
 
     function isRenderedMermaidViewer(node) {
         if (!node || node.nodeType !== 1) return false;
+        let classString = '';
+        if (typeof node.className === 'string') {
+            classString = node.className;
+        } else if (node.classList && typeof node.classList.contains === 'function') {
+            if (Array.isArray(node.classList)) {
+                classString = node.classList.join(' ');
+            } else if (node.classList instanceof Set) {
+                classString = Array.from(node.classList).join(' ');
+            }
+        }
+        if (!classString) {
+            const classAttr = getAttribute(node, 'class');
+            if (typeof classAttr === 'string') {
+                classString = classAttr;
+            }
+        }
+        const lowerClass = classString.toLowerCase();
+        if (lowerClass.includes('mermaid-viewer') || lowerClass.includes('mermaid-container') || lowerClass.includes('mermaid')) {
+            const svgChild = findDescendants(node, (child) => {
+                const tag = getTagName(child);
+                if (tag !== 'SVG') return false;
+                const id = getAttribute(child, 'id') || '';
+                return id.startsWith('claude-mermaid-') || id.includes('mermaid');
+            });
+            return svgChild.length > 0;
+        }
+
         const tag = getTagName(node);
-        const className = typeof node.className === 'string'
-            ? node.className
-            : (getAttribute(node, 'class') || '');
-        const id = typeof node.id === 'string'
-            ? node.id
-            : (getAttribute(node, 'id') || '');
-
-        if (tag === 'SVG' && (id.startsWith('claude-mermaid') || /(?:^|\s)mermaid(?:\s|$)/i.test(className))) {
-            return true;
+        if (tag === 'SVG') {
+            const id = getAttribute(node, 'id') || '';
+            return id.startsWith('claude-mermaid-') || id.includes('mermaid');
         }
 
-        if (/(?:^|\s)mermaid-viewer(?:\s|$)/i.test(className)) {
-            return true;
-        }
-
-        const svgChild = findDescendants(node, (child) => {
-            const childTag = getTagName(child);
-            const childId = typeof child.id === 'string' ? child.id : (getAttribute(child, 'id') || '');
-            return childTag === 'SVG' && childId.startsWith('claude-mermaid');
-        });
-
-        return svgChild.length > 0;
-    }
-
-    function isInsideThead(node) {
-        let current = node ? node.parentNode : null;
-        while (current) {
-            if (getTagName(current) === 'THEAD') return true;
-            if (getTagName(current) === 'TABLE') return false;
-            current = current.parentNode;
-        }
         return false;
     }
 
-    function getCellAlignment(cell) {
-        const alignAttr = getAttribute(cell, 'align');
-        if (alignAttr) {
-            const alignLower = alignAttr.toLowerCase();
-            if (alignLower === 'center') return 'center';
-            if (alignLower === 'right') return 'right';
-            if (alignLower === 'left') return 'left';
+    function checkTraversalBudget(state) {
+        state.visitedNodes++;
+        if (state.visitedNodes > state.maxNodes) {
+            addWarning(state, 'DOM traversal limit reached; input was truncated.');
+            state.budgetExceeded = true;
+            return false;
         }
-
-        const styleAttr = getAttribute(cell, 'style');
-        if (typeof styleAttr === 'string') {
-            const normalized = styleAttr.toLowerCase().replace(/\s+/g, '');
-            if (normalized.includes('text-align:center')) return 'center';
-            if (normalized.includes('text-align:right')) return 'right';
-            if (normalized.includes('text-align:left')) return 'left';
-        }
-
-        return 'left';
+        return true;
     }
 
     function addWarning(state, warningText) {
@@ -285,287 +381,348 @@
         }
     }
 
-    function convertInlineChildren(node, state) {
-        const children = getChildNodes(node);
+    function convertInlineChildren(node, state, depth = 0) {
+        if (state.budgetExceeded || state.outputBudgetExceeded) return '';
+        if (depth > state.maxDepth) {
+            addWarning(state, 'DOM depth limit reached; deep nodes omitted.');
+            return '';
+        }
         let result = '';
+        const children = getChildNodes(node);
         for (const child of children) {
-            result += convertInlineNode(child, state);
+            if (state.budgetExceeded || state.outputBudgetExceeded) break;
+            result += convertInlineNode(child, state, depth + 1);
         }
         return result;
     }
 
-    function convertInlineNode(node, state) {
+    function convertInlineNode(node, state, depth = 0) {
         if (!node) return '';
+        if (state.budgetExceeded || state.outputBudgetExceeded) return '';
+        if (depth > state.maxDepth) {
+            addWarning(state, 'DOM depth limit reached; deep nodes omitted.');
+            return '';
+        }
+        if (!checkTraversalBudget(state)) return '';
 
         if (node.nodeType === 3) {
-            const text = node.textContent !== undefined ? node.textContent : (node.nodeValue || '');
-            return text.replace(/\s+/g, ' ');
+            return node.nodeValue || node.textContent || '';
         }
 
         if (node.nodeType !== 1) return '';
+
         if (shouldExcludeElement(node)) return '';
 
         const tag = getTagName(node);
 
         switch (tag) {
+            case 'BR':
+                return '  \n';
+
             case 'STRONG':
             case 'B': {
-                const inner = convertInlineChildren(node, state).trim();
+                const inner = convertInlineChildren(node, state, depth);
                 return inner ? `**${inner}**` : '';
             }
+
             case 'EM':
             case 'I': {
-                const inner = convertInlineChildren(node, state).trim();
+                const inner = convertInlineChildren(node, state, depth);
                 return inner ? `*${inner}*` : '';
             }
+
             case 'DEL':
             case 'S':
             case 'STRIKE': {
-                const inner = convertInlineChildren(node, state).trim();
+                const inner = convertInlineChildren(node, state, depth);
                 return inner ? `~~${inner}~~` : '';
             }
+
             case 'CODE': {
-                const codeText = node.textContent !== undefined ? node.textContent : '';
-                if (!codeText) return '';
-                if (codeText.includes('`')) {
-                    const fence = codeText.startsWith('`') || codeText.endsWith('`') ? '`` ' : '``';
-                    const closingFence = codeText.startsWith('`') || codeText.endsWith('`') ? ' ``' : '``';
-                    return `${fence}${codeText}${closingFence}`;
-                }
-                return `\`${codeText}\``;
+                const codeText = node.textContent || '';
+                return escapeInlineCode(codeText);
             }
+
             case 'A': {
-                state.metadata.linksCount++;
                 const href = getAttribute(node, 'href');
+                const title = getAttribute(node, 'title');
+                const innerText = convertInlineChildren(node, state, depth).trim();
                 const sanitized = sanitizeUrl(href);
-                const text = convertInlineChildren(node, state).trim();
-                if (!sanitized) {
-                    return text;
+
+                if (sanitized) {
+                    state.metadata.linksCount++;
+                    const safeTitle = title ? ` "${sanitizeInlineAttr(title)}"` : '';
+                    return `[${innerText || sanitized}](${sanitized}${safeTitle})`;
+                } else {
+                    return innerText;
                 }
-                const linkText = text || sanitized;
-                const title = getAttribute(node, 'title');
-                if (title && typeof title === 'string') {
-                    const safeTitle = title.replace(/"/g, '\\"');
-                    return `[${linkText}](${sanitized} "${safeTitle}")`;
-                }
-                return `[${linkText}](${sanitized})`;
             }
+
             case 'IMG': {
-                state.metadata.imagesCount++;
                 const src = getAttribute(node, 'src');
-                const sanitized = sanitizeUrl(src);
-                if (!sanitized) {
-                    if (src) {
-                        addWarning(state, 'Unsafe image source was omitted.');
-                    }
-                    return '';
-                }
-                const alt = (getAttribute(node, 'alt') || '').replace(/[\[\]]/g, '');
+                const alt = getAttribute(node, 'alt') || '';
                 const title = getAttribute(node, 'title');
-                if (title && typeof title === 'string') {
-                    const safeTitle = title.replace(/"/g, '\\"');
-                    return `![${alt}](${sanitized} "${safeTitle}")`;
+                const sanitized = sanitizeUrl(src);
+
+                if (sanitized) {
+                    state.metadata.imagesCount++;
+                    const safeAlt = sanitizeAltText(alt);
+                    const safeTitle = title ? ` "${sanitizeInlineAttr(title)}"` : '';
+                    return `![${safeAlt}](${sanitized}${safeTitle})`;
                 }
-                return `![${alt}](${sanitized})`;
+                return '';
             }
-            case 'BR':
-                return '  \n';
+
             case 'SPAN':
+            case 'LABEL':
             case 'SMALL':
             case 'SUB':
             case 'SUP':
             case 'MARK':
+            case 'TIME':
             case 'ABBR':
             case 'CITE':
             case 'Q':
-            case 'TIME':
-            case 'VAR':
             case 'KBD':
+            case 'VAR':
             case 'SAMP':
-                return convertInlineChildren(node, state);
+            case 'DATA':
+            case 'DFN':
+            case 'BDI':
+            case 'BDO':
+            case 'RUBY':
+            case 'RT':
+            case 'RP':
+                return convertInlineChildren(node, state, depth);
+
             default:
-                return convertInlineChildren(node, state);
+                return convertInlineChildren(node, state, depth);
         }
     }
 
-    function convertTable(tableEl, state) {
+    function getCellAlignment(thOrTd) {
+        const alignAttr = getAttribute(thOrTd, 'align');
+        if (alignAttr) {
+            const lower = alignAttr.toLowerCase();
+            if (lower === 'left') return ':---';
+            if (lower === 'center') return ':---:';
+            if (lower === 'right') return '---:';
+        }
+        const styleAttr = getAttribute(thOrTd, 'style');
+        if (styleAttr) {
+            const normalized = styleAttr.replace(/\s+/g, '').toLowerCase();
+            if (normalized.includes('text-align:left')) return ':---';
+            if (normalized.includes('text-align:center')) return ':---:';
+            if (normalized.includes('text-align:right')) return '---:';
+        }
+        return '---';
+    }
+
+    function convertTable(tableEl, state, depth = 0) {
+        if (state.budgetExceeded || state.outputBudgetExceeded) return '';
+        if (depth > state.maxDepth) {
+            addWarning(state, 'DOM depth limit reached; deep nodes omitted.');
+            return '';
+        }
+        if (!checkTraversalBudget(state)) return '';
+
         state.metadata.tablesCount++;
         const trElements = findDescendants(tableEl, (child) => getTagName(child) === 'TR');
         if (trElements.length === 0) return '';
 
         const rows = [];
         let maxCols = 0;
+        const alignments = [];
 
         for (const tr of trElements) {
-            const cells = [];
-            const cellChildren = getChildNodes(tr).filter((c) => {
+            if (state.budgetExceeded || state.outputBudgetExceeded) break;
+            if (!checkTraversalBudget(state)) break;
+            if (shouldExcludeElement(tr)) continue;
+
+            const cells = getChildNodes(tr).filter((c) => {
                 const tag = getTagName(c);
                 return tag === 'TH' || tag === 'TD';
             });
 
-            for (const cell of cellChildren) {
-                const align = getCellAlignment(cell);
-                const cellText = convertInlineChildren(cell, state)
-                    .replace(/\r?\n/g, '<br>')
-                    .replace(/\|/g, '\\|')
-                    .trim();
-                cells.push({ text: cellText, align });
-            }
+            if (cells.length === 0) continue;
 
-            if (cells.length > maxCols) {
-                maxCols = cells.length;
+            const rowCells = [];
+            cells.forEach((cell, colIndex) => {
+                if (shouldExcludeElement(cell)) return;
+                checkTraversalBudget(state);
+                const cellText = convertInlineChildren(cell, state, depth + 1).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+                rowCells.push(cellText);
+
+                if (!alignments[colIndex]) {
+                    alignments[colIndex] = getCellAlignment(cell);
+                }
+            });
+
+            if (rowCells.length > maxCols) {
+                maxCols = rowCells.length;
             }
-            if (cells.length > 0) {
-                rows.push(cells);
-            }
+            rows.push(rowCells);
         }
 
         if (rows.length === 0 || maxCols === 0) return '';
 
-        const alignments = [];
-        for (let c = 0; c < maxCols; c++) {
-            let colAlign = 'left';
-            for (const r of rows) {
-                if (r[c] && r[c].align && r[c].align !== 'left') {
-                    colAlign = r[c].align;
-                    break;
-                }
+        for (let i = 0; i < maxCols; i++) {
+            if (!alignments[i]) {
+                alignments[i] = '---';
             }
-            alignments.push(colAlign);
         }
 
-        const lines = [];
-        const headerRow = rows[0];
-        const headerCells = [];
-        for (let c = 0; c < maxCols; c++) {
-            headerCells.push(headerRow[c] ? headerRow[c].text : '');
-        }
-        lines.push(`| ${headerCells.join(' | ')} |`);
-
-        const delimiterCells = alignments.map((align) => {
-            if (align === 'center') return ':---:';
-            if (align === 'right') return '---:';
-            return ':---';
+        const formattedRows = rows.map((r) => {
+            while (r.length < maxCols) {
+                r.push('');
+            }
+            return `| ${r.join(' | ')} |`;
         });
-        lines.push(`| ${delimiterCells.join(' | ')} |`);
 
-        for (let r = 1; r < rows.length; r++) {
-            const row = rows[r];
-            const rowCells = [];
-            for (let c = 0; c < maxCols; c++) {
-                rowCells.push(row[c] ? row[c].text : '');
-            }
-            lines.push(`| ${rowCells.join(' | ')} |`);
+        const headerRow = formattedRows[0];
+        const separatorRow = `| ${alignments.slice(0, maxCols).join(' | ')} |`;
+        const bodyRows = formattedRows.slice(1);
+
+        let tableMd = `${headerRow}\n${separatorRow}`;
+        if (bodyRows.length > 0) {
+            tableMd += '\n' + bodyRows.join('\n');
         }
 
-        return lines.join('\n') + '\n\n';
+        return tableMd + '\n\n';
     }
 
-    function convertList(listEl, state, depth = 0) {
+    function convertList(listEl, state, listDepth = 0, domDepth = 0) {
+        if (state.budgetExceeded || state.outputBudgetExceeded) return '';
+        if (domDepth > state.maxDepth) {
+            addWarning(state, 'DOM depth limit reached; deep nodes omitted.');
+            return '';
+        }
+        if (!checkTraversalBudget(state)) return '';
+
         state.metadata.listsCount++;
         const isOrdered = getTagName(listEl) === 'OL';
-        let startIndex = 1;
-        if (isOrdered) {
-            const startAttr = getAttribute(listEl, 'start');
-            if (startAttr && /^\d+$/.test(startAttr)) {
-                startIndex = parseInt(startAttr, 10);
+        const startAttr = getAttribute(listEl, 'start');
+        let counter = startAttr && !isNaN(parseInt(startAttr, 10)) ? parseInt(startAttr, 10) : 1;
+
+        const items = getChildNodes(listEl).filter((c) => getTagName(c) === 'LI');
+        let result = '';
+        const indent = '  '.repeat(listDepth);
+
+        for (const li of items) {
+            if (state.budgetExceeded || state.outputBudgetExceeded) break;
+            if (!checkTraversalBudget(state)) break;
+            if (shouldExcludeElement(li)) continue;
+
+            const prefix = isOrdered ? `${counter++}. ` : '- ';
+            let inlineText = '';
+            let nestedListsMd = '';
+
+            const liChildren = getChildNodes(li);
+            for (const liChild of liChildren) {
+                if (state.budgetExceeded || state.outputBudgetExceeded) break;
+                if (shouldExcludeElement(liChild)) continue;
+                const childTag = getTagName(liChild);
+                if (childTag === 'UL' || childTag === 'OL') {
+                    nestedListsMd += convertList(liChild, state, listDepth + 1, domDepth + 1);
+                } else if (childTag === 'TABLE') {
+                    nestedListsMd += '\n' + convertTable(liChild, state, domDepth + 1);
+                } else if (childTag === 'PRE') {
+                    nestedListsMd += '\n' + convertPre(liChild, state, domDepth + 1);
+                } else if (childTag === 'BLOCKQUOTE') {
+                    nestedListsMd += '\n' + convertBlockquote(liChild, state, domDepth + 1);
+                } else {
+                    inlineText += convertInlineNode(liChild, state, domDepth + 1);
+                }
+            }
+
+            result += `${indent}${prefix}${inlineText.trim()}\n`;
+            if (nestedListsMd) {
+                result += nestedListsMd;
             }
         }
 
-        const indent = '  '.repeat(depth);
-        const lines = [];
-        let currentIndex = startIndex;
-
-        const childNodes = getChildNodes(listEl);
-        for (const child of childNodes) {
-            if (shouldExcludeElement(child)) continue;
-            const tag = getTagName(child);
-            if (tag === 'LI') {
-                const prefix = isOrdered ? `${currentIndex}. ` : '- ';
-                currentIndex++;
-
-                let inlineText = '';
-                const nestedListElements = [];
-
-                const liChildren = getChildNodes(child);
-                for (const liChild of liChildren) {
-                    if (shouldExcludeElement(liChild)) continue;
-                    const liChildTag = getTagName(liChild);
-                    if (liChildTag === 'UL' || liChildTag === 'OL') {
-                        nestedListElements.push(liChild);
-                    } else if (liChildTag === 'P') {
-                        inlineText += convertInlineChildren(liChild, state) + ' ';
-                    } else {
-                        inlineText += convertInlineNode(liChild, state);
-                    }
-                }
-
-                inlineText = inlineText.trim();
-                lines.push(`${indent}${prefix}${inlineText}`);
-
-                for (const nested of nestedListElements) {
-                    const nestedMd = convertList(nested, state, depth + 1);
-                    if (nestedMd.trim()) {
-                        lines.push(nestedMd.trimEnd());
-                    }
-                }
-            }
-        }
-
-        const result = lines.join('\n');
-        return depth === 0 ? (result ? result + '\n\n' : '') : result;
+        return listDepth === 0 ? (result ? result + '\n' : '') : result;
     }
 
-    function convertBlockquote(el, state) {
+    function convertBlockquote(el, state, depth = 0) {
+        if (state.budgetExceeded || state.outputBudgetExceeded) return '';
+        if (depth > state.maxDepth) {
+            addWarning(state, 'DOM depth limit reached; deep nodes omitted.');
+            return '';
+        }
+        if (!checkTraversalBudget(state)) return '';
+
         state.metadata.quotesCount++;
-        const inner = convertBlockChildren(el, state).trim();
-        if (!inner) return '';
-        const lines = inner.split('\n');
-        const quotedLines = lines.map((line) => (line.length > 0 ? `> ${line}` : '>'));
-        return quotedLines.join('\n') + '\n\n';
+        const content = convertBlockChildren(el, state, depth + 1).trim();
+        if (!content) return '';
+        const lines = content.split('\n');
+        return lines.map((line) => `> ${line}`).join('\n') + '\n\n';
     }
 
-    function convertPre(preEl, state) {
+    function convertPre(preEl, state, depth = 0) {
+        if (state.budgetExceeded || state.outputBudgetExceeded) return '';
+        if (depth > state.maxDepth) {
+            addWarning(state, 'DOM depth limit reached; deep nodes omitted.');
+            return '';
+        }
+        if (!checkTraversalBudget(state)) return '';
+
         state.metadata.codeBlocksCount++;
         const codeChildren = findDescendants(preEl, (child) => getTagName(child) === 'CODE');
-        const codeEl = codeChildren.length > 0 ? codeChildren[0] : preEl;
+        let lang = '';
+        let rawCode = '';
 
-        let lang = extractCodeLanguage(codeEl) || extractCodeLanguage(preEl);
-        const rawCode = (codeEl.textContent !== undefined ? codeEl.textContent : (preEl.textContent || '')).replace(/\r\n/g, '\n');
+        if (codeChildren.length > 0) {
+            const codeEl = codeChildren[0];
+            const cls = getAttribute(codeEl, 'class') || '';
+            const match = cls.match(/(?:language|lang)-([a-zA-Z0-9_-]+)/);
+            if (match) {
+                lang = match[1];
+            }
+            rawCode = codeEl.textContent || '';
+        } else {
+            rawCode = preEl.textContent || '';
+        }
 
-        if (lang === 'mermaid') {
+        if (lang === 'mermaid' || lang === 'mermaid-diagram') {
             state.metadata.hasMermaidSource = true;
             state.metadata.mermaidCount++;
         }
 
         const fence = createSafeFence(rawCode);
-        const cleanCode = rawCode.endsWith('\n') ? rawCode.slice(0, -1) : rawCode;
-        return `${fence}${lang}\n${cleanCode}\n${fence}\n\n`;
+        return `${fence}${lang}\n${rawCode}\n${fence}\n\n`;
     }
 
-    function convertBlockNode(node, state) {
+    function convertBlockNode(node, state, depth = 0) {
         if (!node) return '';
+        if (state.budgetExceeded || state.outputBudgetExceeded) return '';
+        if (depth > state.maxDepth) {
+            addWarning(state, 'DOM depth limit reached; deep nodes omitted.');
+            return '';
+        }
+        if (!checkTraversalBudget(state)) return '';
 
         if (node.nodeType === 3) {
-            const text = (node.textContent !== undefined ? node.textContent : (node.nodeValue || '')).trim();
-            return text ? `${text}\n\n` : '';
+            const val = (node.nodeValue || node.textContent || '').trim();
+            return val ? val + '\n\n' : '';
         }
 
         if (node.nodeType !== 1) return '';
-        if (shouldExcludeElement(node)) return '';
 
-        const tag = getTagName(node);
+        if (shouldExcludeElement(node)) return '';
 
         if (isRenderedMermaidViewer(node)) {
             const hasExplicitSource = Boolean(state.metadata.hasMermaidSource);
             if (!hasExplicitSource) {
                 state.metadata.hasSvgOnlyMermaid = true;
                 state.metadata.mermaidCount++;
-                addWarning(state, 'Mermaid diagram source code was unavailable; rendered vector graphic omitted.');
-                return '<!-- [Mermaid diagram: source code unavailable; rendered vector graphic omitted] -->\n\n';
+                addWarning(state, 'Mermaid source is unavailable; rendered SVG was not converted.');
+                return '> [!WARNING]\n> Mermaid source is unavailable; rendered SVG was not converted.\n\n';
             }
             return '';
         }
+
+        const tag = getTagName(node);
 
         switch (tag) {
             case 'H1':
@@ -575,89 +732,135 @@
             case 'H5':
             case 'H6': {
                 state.metadata.headingsCount++;
-                const level = parseInt(tag[1], 10);
-                const prefix = '#'.repeat(level) + ' ';
-                const inner = convertInlineChildren(node, state).trim();
-                return inner ? `${prefix}${inner}\n\n` : '';
+                const level = parseInt(tag.charAt(1), 10);
+                const hashes = '#'.repeat(level);
+                const text = convertInlineChildren(node, state, depth + 1).trim();
+                return text ? `${hashes} ${text}\n\n` : '';
             }
+
             case 'P': {
-                const inner = convertInlineChildren(node, state).trim();
-                return inner ? `${inner}\n\n` : '';
+                const text = convertInlineChildren(node, state, depth + 1).trim();
+                return text ? `${text}\n\n` : '';
             }
+
             case 'HR':
                 return '---\n\n';
-            case 'BLOCKQUOTE':
-                return convertBlockquote(node, state);
+
+            case 'PRE':
+                return convertPre(node, state, depth);
+
             case 'UL':
             case 'OL':
-                return convertList(node, state, 0);
+                return convertList(node, state, 0, depth);
+
             case 'TABLE':
-                return convertTable(node, state);
-            case 'PRE':
-                return convertPre(node, state);
-            case 'DIV':
-            case 'SECTION':
+                return convertTable(node, state, depth);
+
+            case 'BLOCKQUOTE':
+                return convertBlockquote(node, state, depth);
+
             case 'ARTICLE':
+            case 'SECTION':
             case 'MAIN':
-            case 'HEADER':
-            case 'FOOTER':
-            case 'ASIDE':
-            case 'BODY':
-            case 'HTML':
-                return convertBlockChildren(node, state);
+            case 'DIV':
+                return convertBlockChildren(node, state, depth + 1);
+
             default: {
-                const inline = convertInlineNode(node, state).trim();
+                const inline = convertInlineNode(node, state, depth).trim();
                 return inline ? `${inline}\n\n` : '';
             }
         }
     }
 
-    function convertBlockChildren(node, state) {
-        const children = getChildNodes(node);
+    function convertBlockChildren(node, state, depth = 0) {
+        if (state.budgetExceeded || state.outputBudgetExceeded) return '';
+        if (depth > state.maxDepth) {
+            addWarning(state, 'DOM depth limit reached; deep nodes omitted.');
+            return '';
+        }
         let result = '';
+        const children = getChildNodes(node);
         for (const child of children) {
-            result += convertBlockNode(child, state);
+            if (state.budgetExceeded || state.outputBudgetExceeded) break;
+            const blockResult = convertBlockNode(child, state, depth);
+            if (blockResult) {
+                result += blockResult;
+                if (result.length > state.maxChars) {
+                    addWarning(state, 'Character limit reached; Markdown output truncated.');
+                    state.outputBudgetExceeded = true;
+                    result = result.slice(0, state.maxChars);
+                    break;
+                }
+            }
         }
         return result;
     }
 
     function convertDomToMarkdown(rootNode, options = {}) {
+        if (!rootNode) {
+            return {
+                ok: false,
+                code: 'NO_ROOT',
+                markdown: '',
+                warnings: ['Root element is missing.'],
+                metadata: {}
+            };
+        }
+
+        const maxChars = typeof options.maxChars === 'number' ? options.maxChars : MAX_MARKDOWN_CHARS;
+        const maxDepth = typeof options.maxDepth === 'number' ? options.maxDepth : MAX_DOM_DEPTH;
+        const maxNodes = typeof options.maxNodes === 'number' ? options.maxNodes : MAX_DOM_NODES;
+
+        // Pre-scan for explicit Mermaid source code blocks before top-down traversal
+        const explicitMermaidSources = findDescendants(rootNode, (el) => {
+            if (!el || el.nodeType !== 1) return false;
+            const tag = getTagName(el);
+            if (tag === 'CODE') {
+                const cls = (getAttribute(el, 'class') || '').toLowerCase();
+                const lang = getAttribute(el, 'data-language') || getAttribute(el, 'data-lang') || '';
+                return cls.includes('language-mermaid') || cls.includes('lang-mermaid') || lang.toLowerCase() === 'mermaid';
+            }
+            return false;
+        });
+
         const state = {
             warnings: [],
+            visitedNodes: 0,
+            maxNodes,
+            maxDepth,
+            maxChars,
+            budgetExceeded: false,
+            outputBudgetExceeded: false,
             metadata: {
                 title: '',
                 headingsCount: 0,
                 codeBlocksCount: 0,
                 tablesCount: 0,
-                imagesCount: 0,
-                linksCount: 0,
                 listsCount: 0,
                 quotesCount: 0,
+                linksCount: 0,
+                imagesCount: 0,
                 mermaidCount: 0,
-                hasMermaidSource: false,
+                hasMermaidSource: explicitMermaidSources.length > 0,
                 hasSvgOnlyMermaid: false,
                 characterCount: 0
-            },
-            maxChars: typeof options.maxChars === 'number' ? options.maxChars : MAX_MARKDOWN_CHARS
+            }
         };
 
-        if (!rootNode) {
-            return {
-                markdown: '',
-                warnings: ['No DOM root provided for conversion.'],
-                metadata: state.metadata
-            };
+        let docTitle = '';
+        if (typeof options.title === 'string' && options.title.trim()) {
+            docTitle = options.title.trim();
+        } else if (options.document && typeof options.document.title === 'string' && options.document.title.trim()) {
+            docTitle = options.document.title.trim();
+        } else if (typeof document !== 'undefined' && typeof document.title === 'string' && document.title.trim()) {
+            docTitle = document.title.trim();
         }
 
-        const doc = options.document || rootNode.ownerDocument || (rootNode.nodeType === 9 ? rootNode : null);
-        if (doc && doc.title && typeof doc.title === 'string') {
-            const cleanTitle = doc.title.trim();
-            if (cleanTitle && !/^artifact frame/i.test(cleanTitle) && !/^user-generated/i.test(cleanTitle)) {
-                state.metadata.title = cleanTitle;
-            }
+        if (docTitle && docTitle !== 'Claude' && docTitle !== 'Artifact Viewer') {
+            state.metadata.title = docTitle;
         }
 
-        let markdown = convertBlockChildren(rootNode, state).trim();
+        let markdown = convertBlockNode(rootNode, state, 0).trim();
 
         if (!state.metadata.title) {
             const h1Match = markdown.match(/^#\s+(.+)$/m);
@@ -666,46 +869,30 @@
             }
         }
 
-        markdown = markdown.replace(/\n{3,}/g, '\n\n').trim();
-
         if (markdown.length > state.maxChars) {
             markdown = markdown.slice(0, state.maxChars).trim();
-            addWarning(state, 'Markdown output was truncated to stay within message size limits.');
+            addWarning(state, 'Character limit reached; Markdown output truncated.');
         }
 
         state.metadata.characterCount = markdown.length;
 
         return {
+            ok: true,
             markdown,
             warnings: state.warnings,
             metadata: state.metadata
         };
     }
 
-    const AygaArtifactConverter = Object.freeze({
+    root.AygaArtifactConverter = Object.freeze({
         convertDomToMarkdown,
         sanitizeUrl,
+        isSafeUrl,
         createSafeFence,
-        extractCodeLanguage,
+        escapeInlineCode,
         shouldExcludeElement,
         MAX_MARKDOWN_CHARS,
-        MAX_DOM_DEPTH
+        MAX_DOM_DEPTH,
+        MAX_DOM_NODES
     });
-
-    root.AygaArtifactConverter = AygaArtifactConverter;
-
-    if (typeof module !== 'undefined' && module.exports) {
-        module.exports = AygaArtifactConverter;
-    }
 })(typeof globalThis !== 'undefined' ? globalThis : this);
-
-export const convertDomToMarkdown = (typeof globalThis !== 'undefined' && globalThis.AygaArtifactConverter ? globalThis.AygaArtifactConverter.convertDomToMarkdown : null);
-export const sanitizeUrl = (typeof globalThis !== 'undefined' && globalThis.AygaArtifactConverter ? globalThis.AygaArtifactConverter.sanitizeUrl : null);
-export const createSafeFence = (typeof globalThis !== 'undefined' && globalThis.AygaArtifactConverter ? globalThis.AygaArtifactConverter.createSafeFence : null);
-export const extractCodeLanguage = (typeof globalThis !== 'undefined' && globalThis.AygaArtifactConverter ? globalThis.AygaArtifactConverter.extractCodeLanguage : null);
-export const shouldExcludeElement = (typeof globalThis !== 'undefined' && globalThis.AygaArtifactConverter ? globalThis.AygaArtifactConverter.shouldExcludeElement : null);
-export const MAX_MARKDOWN_CHARS = 200000;
-export const MAX_DOM_DEPTH = 32;
-
-export default (typeof globalThis !== 'undefined' ? globalThis.AygaArtifactConverter : null);
-

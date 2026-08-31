@@ -1,23 +1,45 @@
+// artifact-frame.js - Runs inside https://*.frame.claudeusercontent.com frames
+
 (function initArtifactFrame() {
     'use strict';
 
     const bridge = globalThis.AygaArtifactBridge;
-    if (!bridge || !bridge.isApprovedFrameHostname(location.hostname)) return;
-    if (window.top === window) return;
+    const converter = globalThis.AygaArtifactConverter;
+    if (!bridge) return;
 
     function sendResult(requestId, result) {
+        if (!window.parent) return;
         const response = bridge.makeResponse(requestId, result);
-        if (!response || !window.parent) return;
         window.parent.postMessage(response, 'https://claude.ai');
     }
 
-    function getSourceResult() {
-        const root = document.querySelector('.artifact-content') || document.body;
-        const converter = globalThis.AygaArtifactConverter;
+    function findConfirmedArtifactRoot() {
+        return document.querySelector(
+            '.artifact-content, [data-artifact-content], main.artifact-viewer, [data-testid="artifact-content"]'
+        );
+    }
 
-        if (converter && typeof converter.convertDomToMarkdown === 'function' && root) {
-            const conversion = converter.convertDomToMarkdown(root, { document });
-            if (!conversion.markdown && conversion.metadata.hasSvgOnlyMermaid) {
+    function getSourceResult() {
+        const confirmedRoot = findConfirmedArtifactRoot();
+
+        if (!confirmedRoot) {
+            return {
+                ok: false,
+                code: 'NO_EXPORTABLE_SOURCE',
+                message: 'No exportable Artifact source was found (confirmed root element missing).',
+                markdown: '',
+                metadata: {},
+                warnings: ['No confirmed artifact container found in frame DOM.'],
+                sourceAvailable: false,
+                mermaidSourceAvailable: false
+            };
+        }
+
+        if (converter && typeof converter.convertDomToMarkdown === 'function') {
+            const frameTitle = document.title || '';
+            const conversion = converter.convertDomToMarkdown(confirmedRoot, { title: frameTitle });
+
+            if (conversion.metadata && conversion.metadata.hasSvgOnlyMermaid) {
                 return {
                     ok: false,
                     code: 'MERMAID_SOURCE_UNAVAILABLE',
@@ -29,6 +51,7 @@
                     mermaidSourceAvailable: false
                 };
             }
+
             if (!conversion.markdown) {
                 return {
                     ok: false,
@@ -41,6 +64,7 @@
                     mermaidSourceAvailable: false
                 };
             }
+
             return {
                 ok: true,
                 code: 'CONVERTED_SUCCESS',
@@ -52,7 +76,8 @@
             };
         }
 
-        const source = document.querySelector(
+        // Fallback checks if converter is unavailable
+        const source = confirmedRoot.querySelector(
             'pre > code.language-mermaid, pre > code.lang-mermaid, pre > code[data-language="mermaid"], pre > code[data-lang="mermaid"]'
         );
         if (source) {
@@ -62,7 +87,7 @@
                 : { ok: false, code: 'EMPTY_SOURCE', message: 'Artifact source is empty.', sourceAvailable: false, mermaidSourceAvailable: false };
         }
 
-        const renderedMermaid = document.querySelector('svg#claude-mermaid-0, svg[id^="claude-mermaid-"]');
+        const renderedMermaid = confirmedRoot.querySelector('svg#claude-mermaid-0, svg[id^="claude-mermaid-"]');
         if (renderedMermaid) {
             return {
                 ok: false,
@@ -73,7 +98,7 @@
             };
         }
 
-        const hasVisibleContent = Boolean(document.querySelector('h1,h2,h3,h4,h5,h6,p,ul,ol,blockquote,table,pre > code'));
+        const hasVisibleContent = Boolean(confirmedRoot.querySelector('h1,h2,h3,h4,h5,h6,p,ul,ol,blockquote,table,pre > code'));
         return hasVisibleContent
             ? { ok: true, code: 'CONTENT_AVAILABLE', sourceAvailable: true, mermaidSourceAvailable: false }
             : { ok: false, code: 'NO_EXPORTABLE_SOURCE', message: 'No exportable Artifact source was found.', sourceAvailable: false, mermaidSourceAvailable: false };
