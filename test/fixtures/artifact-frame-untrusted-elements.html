@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Artifact Frame with Untrusted Elements</title>
+</head>
+<body>
+  <div class="artifact-content">
+    <h3>Content Header</h3>
+    <script>alert("malicious script");</script>
+    <style>body { display: none; }</style>
+    <noscript>JavaScript is required.</noscript>
+    <template><p>Hidden template content</p></template>
+    <p>Visible safe text paragraph.</p>
+    <span aria-hidden="true" class="service-icon">ℹ️</span>
+    <blockquote>This is a blockquote.</blockquote>
+  </div>
+</body>
+</html>

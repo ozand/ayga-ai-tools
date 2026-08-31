@@ -1,0 +1,10 @@
+{
+  "name": "ayga-ai-tools",
+  "version": "1.9.0",
+  "description": "Deterministic checks and tooling for ClaudeSave / ayga-ai-tools",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/artifact-dom-map.test.js"
+  },
+  "license": "Apache-2.0"
+}
