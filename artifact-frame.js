@@ -12,6 +12,46 @@
     }
 
     function getSourceResult() {
+        const root = document.querySelector('.artifact-content') || document.body;
+        const converter = globalThis.AygaArtifactConverter;
+
+        if (converter && typeof converter.convertDomToMarkdown === 'function' && root) {
+            const conversion = converter.convertDomToMarkdown(root, { document });
+            if (!conversion.markdown && conversion.metadata.hasSvgOnlyMermaid) {
+                return {
+                    ok: false,
+                    code: 'MERMAID_SOURCE_UNAVAILABLE',
+                    message: 'Mermaid source is unavailable; rendered SVG was not converted.',
+                    markdown: '',
+                    metadata: conversion.metadata,
+                    warnings: conversion.warnings,
+                    sourceAvailable: false,
+                    mermaidSourceAvailable: false
+                };
+            }
+            if (!conversion.markdown) {
+                return {
+                    ok: false,
+                    code: 'NO_EXPORTABLE_SOURCE',
+                    message: 'No exportable Artifact source was found.',
+                    markdown: '',
+                    metadata: conversion.metadata,
+                    warnings: conversion.warnings,
+                    sourceAvailable: false,
+                    mermaidSourceAvailable: false
+                };
+            }
+            return {
+                ok: true,
+                code: 'CONVERTED_SUCCESS',
+                markdown: conversion.markdown,
+                metadata: conversion.metadata,
+                warnings: conversion.warnings,
+                sourceAvailable: true,
+                mermaidSourceAvailable: !conversion.metadata.hasSvgOnlyMermaid
+            };
+        }
+
         const source = document.querySelector(
             'pre > code.language-mermaid, pre > code.lang-mermaid, pre > code[data-language="mermaid"], pre > code[data-lang="mermaid"]'
         );

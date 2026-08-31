@@ -23,7 +23,7 @@
             "run_at": "document_end",
             "matches": ["https://*.frame.claudeusercontent.com/*"],
             "all_frames": true,
-            "js": ["utils/artifact-bridge.js", "artifact-frame.js"]
+            "js": ["utils/artifact-converter.js", "utils/artifact-bridge.js", "artifact-frame.js"]
         },
         {
             "run_at": "document_end",

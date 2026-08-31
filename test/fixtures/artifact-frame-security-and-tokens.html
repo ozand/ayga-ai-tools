@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Security and Tokenized URLs Test</title>
+</head>
+<body>
+  <div class="artifact-content">
+    <h2>Links Security Test</h2>
+    <p>Legitimate link: <a href="https://example.com/guide">Safe Guide</a></p>
+    <p>JavaScript scheme link: <a href="javascript:alert('xss')">Malicious JS link</a></p>
+    <p>Data scheme link: <a href="data:text/html,<script>alert(1)</script>">Data payload link</a></p>
+    <p>Blob scheme link: <a href="blob:https://claude.ai/uuid-test">Blob URL link</a></p>
+    <p>Tokenized Claude frame link: <a href="https://abc-123.frame.claudeusercontent.com/sandbox?token=secret123&session=priv#target">Frame Sandbox Link</a></p>
+    
+    <h2>Images Security Test</h2>
+    <p>Safe image: <img src="https://images.example.com/pic.jpg" alt="Valid Pic" /></p>
+    <p>JavaScript image: <img src="javascript:alert(1)" alt="Bad Pic" /></p>
+    <p>Tokenized frame image: <img src="https://xyz.frame.claudeusercontent.com/image.png?auth_token=super_secret" alt="Frame Image" /></p>
+    
+    <h2>Blacklisted / Unsafe Elements Test</h2>
+    <script>const secret = "should not execute or leak";</script>
+    <style>.hidden { display: none; }</style>
+    <noscript>Requires JavaScript</noscript>
+    <template><div>Secret template markup</div></template>
+    <iframe src="https://evil.com"></iframe>
+    <canvas id="hidden-canvas"></canvas>
+    
+    <div style="display: none;">Inline hidden text</div>
+    <div style="visibility: hidden;">Visibility hidden text</div>
+    <div aria-hidden="true">Aria hidden service text</div>
+    <button class="copy-button">Copy code</button>
+    <div class="service-icon">⚙️</div>
+    <span class="sr-only">Screen reader helper</span>
+    
+    <p>Normal visible trailing paragraph.</p>
+  </div>
+</body>
+</html>

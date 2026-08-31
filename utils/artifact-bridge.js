@@ -81,12 +81,15 @@
     }
 
     function isValidResult(result) {
-        if (!isPlainObject(result) || Object.keys(result).length > 5) return false;
+        if (!isPlainObject(result) || Object.keys(result).length > 8) return false;
         if (typeof result.ok !== 'boolean') return false;
         if (result.code !== undefined &&
             (typeof result.code !== 'string' || result.code.length > 64)) return false;
         if (result.message !== undefined &&
             (typeof result.message !== 'string' || result.message.length > MAX_RESULT_MESSAGE_LENGTH)) return false;
+        if (result.markdown !== undefined && typeof result.markdown !== 'string') return false;
+        if (result.metadata !== undefined && !isPlainObject(result.metadata)) return false;
+        if (result.warnings !== undefined && !Array.isArray(result.warnings)) return false;
         if (result.sourceAvailable !== undefined && typeof result.sourceAvailable !== 'boolean') return false;
         if (result.mermaidSourceAvailable !== undefined && typeof result.mermaidSourceAvailable !== 'boolean') return false;
         return true;
