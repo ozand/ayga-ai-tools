@@ -1,29 +1,40 @@
 {
     "manifest_version": 3,
-    "name": "ClaudeSave",
-    "version": "1.9",
-    "description": "A Chrome extension that saves conversations with Claude to gists.",
+    "name": "Ayga AI Tools",
+    "version": "0.1.0",
+    "description": "Export the currently displayed Claude Artifact to local Markdown.",
     "permissions": ["storage", "tabs", "webRequest", "clipboardWrite"],
-    "host_permissions": ["https://claude.ai/*", "https://api.claude.ai/*"],
+    "host_permissions": ["https://claude.ai/*", "https://*.frame.claudeusercontent.com/*"],
     "background": {
         "service_worker": "background.js",
         "type": "module"
     },
     "action": {
-        "default_title": "ClaudeSave",
+        "default_title": "Ayga AI Tools",
         "default_popup": "popup/popup.html"
     },
     "content_scripts": [
-        {   
+        {
             "run_at": "document_end",
             "matches": ["https://claude.ai/*"],
             "js": ["utils/banner.js", "content.js"]
+        },
+        {
+            "run_at": "document_end",
+            "matches": ["https://*.frame.claudeusercontent.com/*"],
+            "all_frames": true,
+            "js": ["utils/artifact-bridge.js", "artifact-frame.js"]
+        },
+        {
+            "run_at": "document_end",
+            "matches": ["https://claude.ai/code/artifact/*"],
+            "js": ["utils/artifact-bridge.js", "artifact-shell.js"]
         }
     ],
     "web_accessible_resources": [
         {
             "resources": ["images/anthropic.png"],
-            "matches": ["<all_urls>"]
+            "matches": ["https://claude.ai/*"]
         }
     ],
     "icons": {
