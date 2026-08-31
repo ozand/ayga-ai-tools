@@ -50,11 +50,17 @@
             const frameTitle = document.title || '';
             const conversion = converter.convertDomToMarkdown(confirmedRoot, { title: frameTitle });
 
-            if (conversion.metadata && conversion.metadata.hasSvgOnlyMermaid) {
+            if (!conversion.markdown) {
+                const code = conversion.metadata && conversion.metadata.hasSvgOnlyMermaid
+                    ? 'MERMAID_SOURCE_UNAVAILABLE'
+                    : 'NO_EXPORTABLE_SOURCE';
+                const message = code === 'MERMAID_SOURCE_UNAVAILABLE'
+                    ? 'Mermaid source is unavailable; rendered SVG was not converted.'
+                    : 'No exportable Artifact source was found.';
                 return {
                     ok: false,
-                    code: 'MERMAID_SOURCE_UNAVAILABLE',
-                    message: 'Mermaid source is unavailable; rendered SVG was not converted.',
+                    code,
+                    message,
                     markdown: '',
                     metadata: conversion.metadata,
                     warnings: conversion.warnings,
@@ -63,15 +69,15 @@
                 };
             }
 
-            if (!conversion.markdown) {
+            if (conversion.metadata && conversion.metadata.hasSvgOnlyMermaid) {
+                // Preserve safe prose/code Markdown while reporting the omitted renderer output.
                 return {
-                    ok: false,
-                    code: 'NO_EXPORTABLE_SOURCE',
-                    message: 'No exportable Artifact source was found.',
-                    markdown: '',
+                    ok: true,
+                    code: 'CONVERTED_WITH_WARNINGS',
+                    markdown: conversion.markdown,
                     metadata: conversion.metadata,
                     warnings: conversion.warnings,
-                    sourceAvailable: false,
+                    sourceAvailable: true,
                     mermaidSourceAvailable: false
                 };
             }

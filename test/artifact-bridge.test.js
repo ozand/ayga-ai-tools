@@ -301,11 +301,27 @@ describe('Artifact bridge protocol', () => {
 
         assert.equal(frameSvgOnly.messages.length, 1);
         const svgOnlyResp = frameSvgOnly.messages[0].message;
-        assert.equal(svgOnlyResp.result.ok, false);
-        assert.equal(svgOnlyResp.result.code, 'MERMAID_SOURCE_UNAVAILABLE');
-        assert.equal(svgOnlyResp.result.message, 'Mermaid source is unavailable; rendered SVG was not converted.');
+        assert.equal(svgOnlyResp.result.ok, true);
+        assert.equal(svgOnlyResp.result.code, 'CONVERTED_WITH_WARNINGS');
+        assert.equal(svgOnlyResp.result.markdown.includes('Mermaid source is unavailable'), true);
+        assert.equal(svgOnlyResp.result.mermaidSourceAvailable, false);
         assert.equal(JSON.stringify(svgOnlyResp).includes('<svg'), false, 'Response must not contain raw SVG XML');
         assert.equal(JSON.stringify(svgOnlyResp).includes('token='), false, 'Response must not leak token parameters');
+
+        // Mixed prose plus rendered SVG stays downloadable while SVG source remains unavailable.
+        const mixedSvgHtml = `
+        <html><body>
+            <h2>Safe surrounding content</h2>
+            <p>This text remains exportable.</p>
+            <div class="mermaid-container"><svg id="claude-mermaid-0"><text>Rendered only</text></svg></div>
+        </body></html>`;
+        const mixedSvgFrame = createIntegrationFrame(mixedSvgHtml);
+        mixedSvgFrame.dispatch(mixedSvgFrame.bridge.makeRequest('req-mixed-svg'));
+        const mixedSvgResponse = mixedSvgFrame.messages[0].message;
+        assert.equal(mixedSvgResponse.result.ok, true);
+        assert.equal(mixedSvgResponse.result.code, 'CONVERTED_WITH_WARNINGS');
+        assert.ok(mixedSvgResponse.result.markdown.includes('Safe surrounding content'));
+        assert.equal(mixedSvgResponse.result.mermaidSourceAvailable, false);
 
         // Test 5: Large content bounds enforcement in frame context
         const largeHtml = `
