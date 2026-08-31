@@ -18,7 +18,8 @@ export const EXCLUDED_PATTERNS = [
   /\/\.artifact-.*\.png$/i,
   /\\\.artifact-.*\.png$/i,
   /\.DS_Store$/i,
-  /^node_modules(\/|\\|$)/
+  /^node_modules(\/|\\|$)/,
+  /^images\/screenshots(\/|\\|$)/
 ];
 
 export function isPathExcluded(relPath) {
@@ -79,7 +80,8 @@ export function createPackage(targetZip = 'extension.zip', baseDir = rootDir) {
       'docs*',
       'PROJECT_PLAN.md',
       '*.artifact-*.png',
-      '.artifact-*.png'
+      '.artifact-*.png',
+      'images/screenshots/*'
     ];
     execFileSync('zip', args, { cwd: baseDir, stdio: 'pipe' });
   } else {
@@ -98,6 +100,7 @@ export function createPackage(targetZip = 'extension.zip', baseDir = rootDir) {
       '-x!*.zip',
       '-xr!.artifact-*.png',
       '-xr!.DS_Store',
+      '-xr!images\\screenshots',
       '-xr!node_modules'
     ];
     execFileSync(zipTool, args, { cwd: baseDir, stdio: 'pipe' });

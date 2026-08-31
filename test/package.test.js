@@ -40,6 +40,7 @@ test('isPathExcluded matches excluded directories and files correctly', () => {
   assert.strictEqual(isPathExcluded('.DS_Store'), true);
   assert.strictEqual(isPathExcluded('popup/.DS_Store'), true);
   assert.strictEqual(isPathExcluded('node_modules/foo/bar.js'), true);
+  assert.strictEqual(isPathExcluded('images/screenshots/example.png'), true);
 
   // Included patterns
   assert.strictEqual(isPathExcluded('manifest.json'), false);

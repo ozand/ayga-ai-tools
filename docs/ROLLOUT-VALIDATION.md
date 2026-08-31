@@ -23,9 +23,9 @@ All automated tests are executed via `npm test` / `make test` without external t
 | `test/package.test.js` | Validates cross-platform zip packaging, fallback detection (`zip` / `7z` / `7zz`), and strict exclusion lists. | **PASSED** |
 
 ### 2.2 Automated Execution Results
-- **Node Test Runner**: 51 / 51 tests passed across 11 test suites.
+- **Node Test Runner**: 51 / 51 deterministic tests passed across 11 test suites.
 - **Syntax Check (`node --check`)**: All extension and utility JavaScript files validated with 0 syntax errors.
-- **Manifest Parse**: `manifest.json` parsed successfully against standard Chromium Manifest V3 schema.
+- **Manifest Parse**: `manifest.json` parsed successfully as JSON; Chrome unpacked loading was observed without a reported registration error. This is not a claim of validation against an external schema.
 - **Git Diff Hygiene**: `git diff --check` reported 0 trailing whitespace or format issues.
 
 ---
@@ -64,22 +64,22 @@ The following matrix documents live end-to-end verification scenarios within Chr
 | **MAN-05** | Mermaid Diagram Rendering vs Source | Verify Artifacts with Mermaid code blocks export as ` ```mermaid ` fences and SVG-only diagrams report status cleanly without corrupting document output. | **PARTIAL** (Live SVG-only Artifact correctly displayed `Mermaid source is unavailable; rendered SVG was not converted.`; explicit-source live case remains pending.) |
 | **MAN-06** | Negative / Chat-Only View Isolation | Navigate to a conversation without an Artifact; verify no Artifact export control is injected. | **AUTOMATED PASSED** (Fixture coverage); live chat-only evidence remains pending. |
 
-> **Note on Manual Evidence Status**: Automated fixture-based tests and bridge emulation achieve 100% test coverage for the converter, bridge protocol, filename derivation, and anchor download mechanics. Scenarios marked **MANUAL EVIDENCE PENDING** represent interactive, authenticated end-to-end browser actions on production `claude.ai` endpoints that cannot be executed in headless non-interactive agent test environments.
+> **Note on Manual Evidence Status**: Automated fixture-based tests and bridge emulation provide deterministic representative coverage for the converter, bridge protocol, filename derivation, and anchor download mechanics. They are not a claim of 100% code coverage. Live inspection has confirmed the shell/frame selector, readiness class, approved frame-origin shape, one visible export control, and a clean console at inspection time. Successful live Markdown download and explicit-source Mermaid cases remain unverified. Scenarios marked **MANUAL EVIDENCE PENDING** represent interactive, authenticated end-to-end browser actions on production `claude.ai` endpoints that require operator verification.
 
 ---
 
 ## 5. Packaging Verification
 
-The rollout package was built and integrity-tested locally with the available `7z` fallback through `make package`.
+The rollout package was built and integrity-tested locally with the available `7z` fallback through `make package`. The standard `zip` executable was unavailable in an earlier environment; the packaging script selected `7z` from the supported fallback list.
 
-- `make package`: **PASSED**; produced `extension.zip`.
+- `make package`: **PASSED** using the detected `7z` fallback; produced `extension.zip`.
 - Archive integrity test: **PASSED** (`7z t extension.zip`).
-- Archive contents: runtime extension files and required images only; `.git`, `.pi`, `test/`, `docs/`, `PROJECT_PLAN.md`, archives, dependencies, and local `.artifact-*.png` artifacts were excluded.
+- Archive contents: runtime extension files and required distribution assets; legacy documentation screenshots under `images/screenshots/` are excluded. `.git`, `.pi`, `test/`, `docs/`, `PROJECT_PLAN.md`, archives, dependencies, and local `.artifact-*.png` artifacts are excluded.
 - The package is a distributable build artifact and is intentionally not tracked in Git.
 
 ## 6. Security & Isolation Summary
 
-1. **Origin Verification**: Frame bridge strictly validates postMessage origins (`https://claude.ai` and `https://*.claudeusercontent.com`).
-2. **Zero Network Egress**: Markdown export executes completely client-side in DOM memory; no external analytics, tokens, or document content are transmitted over network.
+1. **Origin Verification**: Frame bridge strictly validates `https://claude.ai` and the exact approved `https://<id>.frame.claudeusercontent.com` frame-origin boundary.
+2. **Artifact Export Network Behavior**: Artifact Markdown export performs no additional extension-generated network request; existing legacy chat/Gist code paths are outside this claim.
 3. **Safe Filenames**: Windows reserved words (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`), path separators (`/`, `\`), control characters, and dangerous punctuation are stripped before download trigger.
 4. **License Attribution**: Apache License 2.0 attribution and notice headers are preserved across all components.
