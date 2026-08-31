@@ -200,7 +200,29 @@ describe('Artifact bridge protocol', () => {
         assert.equal(resp2.result.code, 'NO_EXPORTABLE_SOURCE');
         assert.equal(resp2.result.markdown, '');
 
-        // Test 3: Large content bounds enforcement in frame context
+        // Test 3: Current live-shaped frame body is accepted only with semantic content
+        const bodyArtifactHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head><title>Body-mounted Artifact</title></head>
+        <body>
+            <h1>Body Artifact</h1>
+            <p>Visible content mounted directly under the frame body.</p>
+        </body>
+        </html>`;
+
+        const frameBodyArtifact = createIntegrationFrame(bodyArtifactHtml);
+        const reqBodyArtifact = frameBodyArtifact.bridge.makeRequest('req-body-artifact');
+        frameBodyArtifact.dispatch(reqBodyArtifact);
+
+        assert.equal(frameBodyArtifact.messages.length, 1);
+        const bodyArtifactResponse = frameBodyArtifact.messages[0].message;
+        assert.equal(bodyArtifactResponse.result.ok, true);
+        assert.equal(bodyArtifactResponse.result.code, 'CONVERTED_SUCCESS');
+        assert.ok(bodyArtifactResponse.result.markdown.includes('# Body Artifact'));
+        assert.ok(bodyArtifactResponse.result.markdown.includes('Visible content mounted directly under the frame body.'));
+
+        // Test 4: Large content bounds enforcement in frame context
         const largeHtml = `
         <!DOCTYPE html>
         <html>

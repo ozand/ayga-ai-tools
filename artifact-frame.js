@@ -5,7 +5,8 @@
 
     const bridge = globalThis.AygaArtifactBridge;
     const converter = globalThis.AygaArtifactConverter;
-    if (!bridge) return;
+    if (!bridge || !bridge.isApprovedFrameHostname(location.hostname)) return;
+    if (window.top === window) return;
 
     function sendResult(requestId, result) {
         if (!window.parent) return;
@@ -14,9 +15,19 @@
     }
 
     function findConfirmedArtifactRoot() {
-        return document.querySelector(
+        const confirmedRoot = document.querySelector(
             '.artifact-content, [data-artifact-content], main.artifact-viewer, [data-testid="artifact-content"]'
         );
+        if (confirmedRoot) return confirmedRoot;
+
+        // Current Claude Artifact frames may mount the artifact directly in body.
+        // Use body only when it has a semantic Artifact signal; never use shell body.
+        const frameBody = document.body;
+        if (!frameBody) return null;
+        const hasSemanticContent = frameBody.querySelector(
+            'h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote, table, pre > code, svg[id^="claude-mermaid-"]'
+        );
+        return hasSemanticContent ? frameBody : null;
     }
 
     function getSourceResult() {

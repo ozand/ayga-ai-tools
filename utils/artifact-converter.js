@@ -763,6 +763,8 @@
             case 'SECTION':
             case 'MAIN':
             case 'DIV':
+            case 'BODY':
+            case 'HTML':
                 return convertBlockChildren(node, state, depth + 1);
 
             default: {
