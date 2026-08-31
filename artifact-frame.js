@@ -25,7 +25,7 @@
         const frameBody = document.body;
         if (!frameBody) return null;
         const hasSemanticContent = frameBody.querySelector(
-            'h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote, table, pre > code, svg[id^="claude-mermaid-"]'
+            'h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote, table, pre > code, svg#claude-mermaid-0, svg[id^="claude-mermaid-"]'
         );
         return hasSemanticContent ? frameBody : null;
     }

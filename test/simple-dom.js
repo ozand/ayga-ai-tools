@@ -143,24 +143,34 @@ class SimpleElement extends SimpleNode {
 
     matches(selector) {
         const sel = selector.trim();
-        // Attribute selector [data-foo] or [data-foo="bar"] or [role="button"]
-        const attrMatch = sel.match(/^\[([a-zA-Z0-9_-]+)(?:=["']([^"']*)["'])?\]$/);
+        // Attribute selector [data-foo] or [data-foo="bar"] or [data-foo^="bar"]
+        const attrMatch = sel.match(/^\[([a-zA-Z0-9_-]+)(?:([\^]?=)["']?([^"']*)["']?)?\]$/);
         if (attrMatch) {
             const attrName = attrMatch[1];
-            const attrVal = attrMatch[2];
+            const op = attrMatch[2];
+            const attrVal = attrMatch[3];
             if (attrVal !== undefined) {
-                return this.getAttribute(attrName) === attrVal;
+                const currentVal = this.getAttribute(attrName) || '';
+                if (op === '^=') {
+                    return currentVal.startsWith(attrVal);
+                }
+                return currentVal === attrVal;
             }
             return this.hasAttribute(attrName);
         }
-        // Tag with attribute selector tag[attr] or tag[attr="val"]
-        const tagAttrMatch = sel.match(/^([a-zA-Z0-9-]+)\[([a-zA-Z0-9_-]+)(?:=["']([^"']*)["'])?\]$/);
+        // tag[attr], tag[attr="val"], or tag[attr^="val"]
+        const tagAttrMatch = sel.match(/^([a-zA-Z0-9-]+)\[([a-zA-Z0-9_-]+)(?:([\^]?=)["']?([^"']*)["']?)?\]$/);
         if (tagAttrMatch) {
             if (this.tagName.toLowerCase() !== tagAttrMatch[1].toLowerCase()) return false;
             const attrName = tagAttrMatch[2];
-            const attrVal = tagAttrMatch[3];
+            const op = tagAttrMatch[3];
+            const attrVal = tagAttrMatch[4];
             if (attrVal !== undefined) {
-                return this.getAttribute(attrName) === attrVal;
+                const currentVal = this.getAttribute(attrName) || '';
+                if (op === '^=') {
+                    return currentVal.startsWith(attrVal);
+                }
+                return currentVal === attrVal;
             }
             return this.hasAttribute(attrName);
         }
@@ -190,25 +200,8 @@ class SimpleElement extends SimpleNode {
     }
 
     querySelector(selector) {
-        const selectors = selector.split(',').map(s => s.trim());
-        for (const child of this.childNodes) {
-            if (child.nodeType === ELEMENT_NODE) {
-                for (const s of selectors) {
-                    if (s.includes(' > ')) {
-                        const parts = s.split(' > ').map(p => p.trim());
-                        if (child.matches(parts[0])) {
-                            const sub = child.querySelector(parts.slice(1).join(' > '));
-                            if (sub && sub.parentNode === child) return sub;
-                        }
-                    } else if (child.matches(s)) {
-                        return child;
-                    }
-                }
-                const found = child.querySelector(selector);
-                if (found) return found;
-            }
-        }
-        return null;
+        const results = this.querySelectorAll(selector);
+        return results.length > 0 ? results[0] : null;
     }
 
     querySelectorAll(selector) {

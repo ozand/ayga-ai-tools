@@ -21,9 +21,20 @@ function loadFrameHandler({ hostname, frameHtml = '' }) {
     const listeners = [];
     const messages = [];
     const document = {
+        body: {
+            querySelector(selector) {
+                if (selector.includes('claude-mermaid') && frameHtml.includes('claude-mermaid')) {
+                    return {};
+                }
+                if ((selector.includes('h1') || selector.includes('p')) && frameHtml.includes('safe-content')) {
+                    return {};
+                }
+                return null;
+            }
+        },
         querySelector(selector) {
             if (selector.includes('artifact-content') || selector.includes('artifact-viewer')) {
-                if (frameHtml) {
+                if (frameHtml && !frameHtml.includes('claude-mermaid')) {
                     return this;
                 }
                 return null;
@@ -34,7 +45,7 @@ function loadFrameHandler({ hostname, frameHtml = '' }) {
             if (selector.includes('claude-mermaid') && frameHtml.includes('claude-mermaid')) {
                 return {};
             }
-            if (selector.includes('h1,h2') && frameHtml.includes('safe-content')) return {};
+            if ((selector.includes('h1') || selector.includes('p')) && frameHtml.includes('safe-content')) return {};
             return null;
         }
     };
@@ -101,6 +112,53 @@ describe('Artifact bridge protocol', () => {
         assert.equal(result.code, 'MERMAID_SOURCE_UNAVAILABLE');
         assert.equal(JSON.stringify(result).includes('<svg'), false);
         assert.equal(JSON.stringify(result).includes('token='), false);
+    });
+
+    test('frame ignores execution when hostname is not approved or window is top frame', () => {
+        const bridgeCode = fs.readFileSync(path.join(root, 'utils/artifact-bridge.js'), 'utf8');
+        const frameCode = fs.readFileSync(path.join(root, 'artifact-frame.js'), 'utf8');
+
+        // Case 1: unapproved frame hostname
+        const listeners1 = [];
+        const sandbox1 = {
+            globalThis: {},
+            window: {
+                parent: {},
+                top: {},
+                location: { hostname: 'malicious.attacker.com' },
+                addEventListener(t, cb) { if (t === 'message') listeners1.push(cb); }
+            },
+            document: { querySelector() { return null; } },
+            location: { hostname: 'malicious.attacker.com' },
+            URL,
+            URLSearchParams
+        };
+        sandbox1.globalThis = sandbox1;
+        vm.runInNewContext(bridgeCode, sandbox1);
+        vm.runInNewContext(frameCode, sandbox1);
+        assert.equal(listeners1.length, 0, 'Frame handler should not register listeners on unapproved hostname');
+
+        // Case 2: top-level window (window.top === window)
+        const listeners2 = [];
+        const win2 = {
+            parent: {},
+            top: null,
+            location: { hostname: '01932b12-9c34-7a1b-8f12-3456789abcde.frame.claudeusercontent.com' },
+            addEventListener(t, cb) { if (t === 'message') listeners2.push(cb); }
+        };
+        win2.top = win2;
+        const sandbox2 = {
+            globalThis: {},
+            window: win2,
+            document: { querySelector() { return null; } },
+            location: win2.location,
+            URL,
+            URLSearchParams
+        };
+        sandbox2.globalThis = sandbox2;
+        vm.runInNewContext(bridgeCode, sandbox2);
+        vm.runInNewContext(frameCode, sandbox2);
+        assert.equal(listeners2.length, 0, 'Frame handler should not register listeners when window.top === window');
     });
 
     test('integration: artifact-frame valid postMessage returns converted markdown and bounds are enforced', () => {
@@ -179,18 +237,19 @@ describe('Artifact bridge protocol', () => {
         assert.ok(resp1.result.markdown.includes('`sample_id = 42`'));
         assert.ok(!resp1.result.markdown.includes('Print'));
 
-        // Test 2: Fail-closed on missing confirmed root (no document.body fallback)
-        const unconfirmedHtml = `
+        // Test 2: Fail-closed on body with only header/controls/unconfirmed loose elements
+        const controlOnlyHtml = `
         <!DOCTYPE html>
         <html>
-        <head><title>Unconfirmed Shell</title></head>
+        <head><title>Unconfirmed Shell / Controls</title></head>
         <body>
-            <header>Claude Header Controls</header>
-            <main>Some loose text without artifact container</main>
+            <header><button>Claude Header Controls</button></header>
+            <div class="controls"><button>Action Button</button></div>
+            <div><span>Controls only</span></div>
         </body>
         </html>`;
 
-        const frame2 = createIntegrationFrame(unconfirmedHtml);
+        const frame2 = createIntegrationFrame(controlOnlyHtml);
         const req2 = frame2.bridge.makeRequest('req-integration-2');
         frame2.dispatch(req2);
 
@@ -200,7 +259,7 @@ describe('Artifact bridge protocol', () => {
         assert.equal(resp2.result.code, 'NO_EXPORTABLE_SOURCE');
         assert.equal(resp2.result.markdown, '');
 
-        // Test 3: Current live-shaped frame body is accepted only with semantic content
+        // Test 3: Current live-shaped frame body is accepted for prose content (h1-h6, p, etc.)
         const bodyArtifactHtml = `
         <!DOCTYPE html>
         <html>
@@ -222,7 +281,33 @@ describe('Artifact bridge protocol', () => {
         assert.ok(bodyArtifactResponse.result.markdown.includes('# Body Artifact'));
         assert.ok(bodyArtifactResponse.result.markdown.includes('Visible content mounted directly under the frame body.'));
 
-        // Test 4: Large content bounds enforcement in frame context
+        // Test 4: Body with only rendered Mermaid SVG returns safe warning and MERMAID_SOURCE_UNAVAILABLE
+        const bodySvgOnlyHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head><title>Rendered Mermaid Frame</title></head>
+        <body>
+            <div class="mermaid-container">
+                <svg id="claude-mermaid-0" viewBox="0 0 100 100">
+                    <g><text>Rendered Node</text></g>
+                </svg>
+            </div>
+        </body>
+        </html>`;
+
+        const frameSvgOnly = createIntegrationFrame(bodySvgOnlyHtml);
+        const reqSvgOnly = frameSvgOnly.bridge.makeRequest('req-svg-only');
+        frameSvgOnly.dispatch(reqSvgOnly);
+
+        assert.equal(frameSvgOnly.messages.length, 1);
+        const svgOnlyResp = frameSvgOnly.messages[0].message;
+        assert.equal(svgOnlyResp.result.ok, false);
+        assert.equal(svgOnlyResp.result.code, 'MERMAID_SOURCE_UNAVAILABLE');
+        assert.equal(svgOnlyResp.result.message, 'Mermaid source is unavailable; rendered SVG was not converted.');
+        assert.equal(JSON.stringify(svgOnlyResp).includes('<svg'), false, 'Response must not contain raw SVG XML');
+        assert.equal(JSON.stringify(svgOnlyResp).includes('token='), false, 'Response must not leak token parameters');
+
+        // Test 5: Large content bounds enforcement in frame context
         const largeHtml = `
         <!DOCTYPE html>
         <html>
