@@ -1,5 +1,7 @@
+.PHONY: test package
+
 test:
-	node --test test/artifact-dom-map.test.js test/artifact-bridge.test.js
+	npm test
 
 package:
-	zip -r -FS extension.zip . -x "*.git*" "*.DS_Store" "extension.zip" "node_modules*" "test*" ".pi*" "docs*" "PROJECT_PLAN.md"
+	node utils/package.js
