@@ -8,6 +8,9 @@
     const MAX_REQUEST_ID_LENGTH = 128;
     const MAX_MESSAGE_BYTES = 512 * 1024;
     const MAX_RESULT_MESSAGE_LENGTH = 512;
+    const MAX_ASSETS_COUNT = 64;
+    const MAX_PER_ASSET_BYTES = 256 * 1024;
+    const MAX_AGGREGATE_ASSETS_BYTES = 1024 * 1024;
 
     function isPlainObject(value) {
         if (value === null || typeof value !== 'object') return false;
@@ -80,18 +83,43 @@
         return hasSafeMessageSize(response) ? response : null;
     }
 
-    function isValidSvgFile(file) {
-        if (!isPlainObject(file) || Object.keys(file).length > 5) return false;
+    function isValidAsset(file) {
+        if (!isPlainObject(file)) return false;
+        const keys = Object.keys(file);
+        // Canonical shape has keys: filename, content, mimeType (and backward compat svgContent)
+        for (const k of keys) {
+            if (k !== 'filename' && k !== 'content' && k !== 'mimeType' && k !== 'svgContent') {
+                return false;
+            }
+        }
         if (typeof file.filename !== 'string' || file.filename.length === 0 || file.filename.length > 128) return false;
         if (!file.filename.endsWith('.svg') || !/^[A-Za-z0-9._-]+$/.test(file.filename) || file.filename.includes('..')) return false;
-        const content = typeof file.svgContent === 'string' ? file.svgContent : file.content;
-        if (typeof content !== 'string' || content.length === 0 || content.length > 256 * 1024) return false;
-        if (file.mimeType !== undefined && (typeof file.mimeType !== 'string' || file.mimeType.length > 64)) return false;
+        const content = typeof file.content === 'string' ? file.content : file.svgContent;
+        if (typeof content !== 'string' || content.length === 0 || content.length > MAX_PER_ASSET_BYTES) return false;
+        if (file.mimeType !== 'image/svg+xml') return false;
         return true;
     }
 
+    const ALLOWED_RESULT_KEYS = new Set([
+        'ok',
+        'code',
+        'message',
+        'markdown',
+        'metadata',
+        'warnings',
+        'sourceAvailable',
+        'mermaidSourceAvailable',
+        'assets',
+        'svgFiles',
+        'svgArtifacts'
+    ]);
+
     function isValidResult(result) {
-        if (!isPlainObject(result) || Object.keys(result).length > 12) return false;
+        if (!isPlainObject(result)) return false;
+        for (const key of Object.keys(result)) {
+            if (!ALLOWED_RESULT_KEYS.has(key)) return false;
+        }
+
         if (typeof result.ok !== 'boolean') return false;
         if (result.code !== undefined &&
             (typeof result.code !== 'string' || result.code.length > 64)) return false;
@@ -102,19 +130,29 @@
         if (result.warnings !== undefined && !Array.isArray(result.warnings)) return false;
         if (result.sourceAvailable !== undefined && typeof result.sourceAvailable !== 'boolean') return false;
         if (result.mermaidSourceAvailable !== undefined && typeof result.mermaidSourceAvailable !== 'boolean') return false;
-        if (result.svg !== undefined && typeof result.svg !== 'string') return false;
-        if (result.svgFiles !== undefined) {
-            if (!Array.isArray(result.svgFiles) || result.svgFiles.length > 64) return false;
-            for (const item of result.svgFiles) {
-                if (!isValidSvgFile(item)) return false;
+
+        const assetList = result.assets || result.svgFiles || result.svgArtifacts;
+        if (assetList !== undefined) {
+            if (!Array.isArray(assetList) || assetList.length > MAX_ASSETS_COUNT) return false;
+            let totalBytes = 0;
+            const filenames = new Set();
+            for (const item of assetList) {
+                if (!isValidAsset(item)) return false;
+                if (filenames.has(item.filename)) return false;
+                filenames.add(item.filename);
+                const content = typeof item.content === 'string' ? item.content : item.svgContent;
+                totalBytes += (content || '').length;
+                if (totalBytes > MAX_AGGREGATE_ASSETS_BYTES) return false;
             }
+        }
+
+        if (result.svgFiles !== undefined) {
+            if (!Array.isArray(result.svgFiles) || result.svgFiles.length > MAX_ASSETS_COUNT) return false;
         }
         if (result.svgArtifacts !== undefined) {
-            if (!Array.isArray(result.svgArtifacts) || result.svgArtifacts.length > 64) return false;
-            for (const item of result.svgArtifacts) {
-                if (!isValidSvgFile(item)) return false;
-            }
+            if (!Array.isArray(result.svgArtifacts) || result.svgArtifacts.length > MAX_ASSETS_COUNT) return false;
         }
+
         return true;
     }
 
@@ -136,10 +174,14 @@
         REQUEST_TYPE,
         RESPONSE_TYPE,
         MAX_MESSAGE_BYTES,
+        MAX_ASSETS_COUNT,
+        MAX_PER_ASSET_BYTES,
+        MAX_AGGREGATE_ASSETS_BYTES,
         getSafeFrameOrigin,
         isApprovedFrameHostname,
         isValidRequestId,
-        isValidSvgFile,
+        isValidAsset,
+        isValidSvgFile: isValidAsset,
         hasSafeMessageSize,
         makeRequest,
         isValidRequest,

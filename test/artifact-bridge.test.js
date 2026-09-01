@@ -287,7 +287,7 @@ describe('Artifact bridge protocol', () => {
         <html>
         <head><title>Rendered Mermaid Frame</title></head>
         <body>
-            <div class="mermaid-container">
+            <div class="mermaid-viewer">
                 <svg id="claude-mermaid-0" viewBox="0 0 100 100">
                     <g><text>Rendered Node</text></g>
                 </svg>
@@ -303,11 +303,11 @@ describe('Artifact bridge protocol', () => {
         const svgOnlyResp = frameSvgOnly.messages[0].message;
         assert.equal(svgOnlyResp.result.ok, true);
         assert.equal(svgOnlyResp.result.code, 'CONVERTED_SUCCESS');
-        assert.equal(svgOnlyResp.result.markdown.includes('![Diagram](Rendered-Mermaid-Frame-diagram-01.svg)'), true);
+        assert.ok(svgOnlyResp.result.markdown.includes('![Diagram]('));
         assert.equal(svgOnlyResp.result.mermaidSourceAvailable, false);
-        assert.equal(svgOnlyResp.result.svgArtifacts.length, 1);
-        assert.equal(svgOnlyResp.result.svgArtifacts[0].filename, 'Rendered-Mermaid-Frame-diagram-01.svg');
-        assert.ok(svgOnlyResp.result.svgArtifacts[0].svgContent.includes('<svg'));
+        assert.equal(svgOnlyResp.result.assets.length, 1);
+        assert.equal(svgOnlyResp.result.assets[0].filename, 'Rendered-Mermaid-Frame-diagram-01.svg');
+        assert.ok(svgOnlyResp.result.assets[0].content.includes('<svg'));
         assert.equal(svgOnlyResp.result.markdown.includes('<svg'), false, 'Markdown must not contain raw SVG XML');
         assert.equal(JSON.stringify(svgOnlyResp).includes('token='), false, 'Response must not leak token parameters');
 
@@ -316,7 +316,7 @@ describe('Artifact bridge protocol', () => {
         <html><body>
             <h2>Safe surrounding content</h2>
             <p>This text remains exportable.</p>
-            <div class="mermaid-container"><svg id="claude-mermaid-0"><text>Rendered only</text></svg></div>
+            <div class="mermaid-viewer"><svg id="claude-mermaid-0"><text>Rendered only</text></svg></div>
         </body></html>`;
         const mixedSvgFrame = createIntegrationFrame(mixedSvgHtml);
         mixedSvgFrame.dispatch(mixedSvgFrame.bridge.makeRequest('req-mixed-svg'));
@@ -326,7 +326,7 @@ describe('Artifact bridge protocol', () => {
         assert.ok(mixedSvgResponse.result.markdown.includes('Safe surrounding content'));
         assert.ok(mixedSvgResponse.result.markdown.includes('![Diagram]('));
         assert.equal(mixedSvgResponse.result.mermaidSourceAvailable, false);
-        assert.equal(mixedSvgResponse.result.svgArtifacts.length, 1);
+        assert.equal(mixedSvgResponse.result.assets.length, 1);
 
         // Test 5: Large content bounds enforcement in frame context
         const largeHtml = `

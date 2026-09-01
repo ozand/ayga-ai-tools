@@ -47,10 +47,14 @@
         }
 
         if (converter && typeof converter.convertDomToMarkdown === 'function') {
-            const frameTitle = document.title || '';
-            const conversion = converter.convertDomToMarkdown(confirmedRoot, { title: frameTitle });
+            const rawTitle = document.title || '';
+            const isGeneric = !rawTitle || rawTitle === 'Claude' || rawTitle === 'Artifact Viewer' || rawTitle === 'Rendered Mermaid Frame';
+            const frameTitle = isGeneric ? '' : rawTitle;
+            const conversion = converter.convertDomToMarkdown(confirmedRoot, { title: frameTitle, baseName: frameTitle || '' });
 
-            if (!conversion.markdown) {
+            const assets = Array.isArray(conversion.assets) ? conversion.assets : [];
+
+            if (!conversion.markdown && assets.length === 0) {
                 const code = conversion.metadata && conversion.metadata.hasSvgOnlyMermaid
                     ? 'MERMAID_SOURCE_UNAVAILABLE'
                     : 'NO_EXPORTABLE_SOURCE';
@@ -69,15 +73,15 @@
                 };
             }
 
-            const svgFiles = Array.isArray(conversion.svgFiles) ? conversion.svgFiles : [];
-
-            if (conversion.metadata && conversion.metadata.hasSvgOnlyMermaid && svgFiles.length === 0) {
+            if (conversion.metadata && conversion.metadata.hasSvgOnlyMermaid && assets.length === 0) {
                 // Preserve safe prose/code Markdown while reporting the omitted renderer output.
                 return {
                     ok: true,
                     code: 'CONVERTED_WITH_WARNINGS',
                     markdown: conversion.markdown,
+                    assets: [],
                     svgFiles: [],
+                    svgArtifacts: [],
                     metadata: conversion.metadata,
                     warnings: conversion.warnings,
                     sourceAvailable: true,
@@ -89,8 +93,9 @@
                 ok: true,
                 code: 'CONVERTED_SUCCESS',
                 markdown: conversion.markdown,
-                svgFiles,
-                svgArtifacts: svgFiles,
+                assets,
+                svgFiles: assets,
+                svgArtifacts: assets,
                 metadata: conversion.metadata,
                 warnings: conversion.warnings,
                 sourceAvailable: true,

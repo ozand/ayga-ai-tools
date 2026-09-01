@@ -118,11 +118,13 @@
             Blob: typeof window !== 'undefined' && window.Blob ? window.Blob : (typeof Blob !== 'undefined' ? Blob : undefined)
         };
 
+        const assets = result.assets || result.svgFiles || result.svgArtifacts || [];
         let downloadOutcome;
         if (typeof downloader.downloadArtifactBundle === 'function') {
             downloadOutcome = downloader.downloadArtifactBundle({
                 markdown,
-                svgFiles: result.svgFiles,
+                assets,
+                svgFiles: assets,
                 metadata: result.metadata
             }, downloadOptions);
         } else {

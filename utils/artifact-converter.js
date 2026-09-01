@@ -8,6 +8,10 @@
     const MAX_DOM_NODES = 10000;
     const MAX_WARNINGS = 50;
     const MAX_SVG_BYTES = 256 * 1024; // 256 KB limit for SVG diagrams
+    const MAX_SVG_NODES = 1000;
+    const MAX_SVG_DEPTH = 32;
+    const MAX_SVG_ATTRS_PER_NODE = 30;
+    const MAX_SVG_TEXT_PER_NODE = 10000;
 
     const BLACKLISTED_TAGS = new Set([
         'SCRIPT',
@@ -194,7 +198,7 @@
         return input || 'artifact';
     }
 
-    function sanitizeCssStyle(rawStyle) {
+    function sanitizeCssStyle(rawStyle, definedIds = null) {
         if (typeof rawStyle !== 'string') return '';
         const style = rawStyle.trim();
         if (!style) return '';
@@ -213,11 +217,17 @@
 
             if (!ALLOWED_STYLE_PROPERTIES.has(prop)) continue;
             if (/[\u0000-\u001F\u007F-\u009F]/.test(val)) continue;
-            if (/javascript:|vbscript:|expression\(|@import|-moz-binding|<|>/i.test(val)) continue;
+            if (/javascript:|vbscript:|expression\(|@import|-moz-binding|<|>|http:\/\/|https:\/\/|\/\//i.test(val)) continue;
             if (/\bbehavior\b/i.test(val) || /\b-ms-behavior\b/i.test(val)) continue;
 
-            if (/url\(/i.test(val) && !/^url\s*\(\s*#[A-Za-z0-9_-]+\s*\)$/i.test(val)) {
-                continue;
+            if (/url\(/i.test(val)) {
+                const urlMatch = val.match(/^url\s*\(\s*#([A-Za-z0-9_-]+)\s*\)$/i);
+                if (!urlMatch) {
+                    continue;
+                }
+                if (definedIds && !definedIds.has(urlMatch[1])) {
+                    continue;
+                }
             }
 
             safeDecls.push(`${prop}: ${val}`);
@@ -226,7 +236,27 @@
         return safeDecls.length > 0 ? safeDecls.join('; ') + ';' : '';
     }
 
-    function getSanitizedSvgAttributes(node, isRoot = false) {
+    function collectDefinedSvgIds(rootNode) {
+        const definedIds = new Set();
+        function scan(node, depth = 0) {
+            if (!node || node.nodeType !== 1 || depth > MAX_SVG_DEPTH) return;
+            const idVal = getAttribute(node, 'id');
+            if (idVal && typeof idVal === 'string') {
+                const trimmed = idVal.trim();
+                if (/^[A-Za-z0-9_-]+$/.test(trimmed)) {
+                    definedIds.add(trimmed);
+                }
+            }
+            const children = getChildNodes(node);
+            for (const child of children) {
+                scan(child, depth + 1);
+            }
+        }
+        scan(rootNode, 0);
+        return definedIds;
+    }
+
+    function getSanitizedSvgAttributes(node, isRoot = false, definedIds = null) {
         const result = {};
         if (!node || node.nodeType !== 1) return result;
 
@@ -246,8 +276,11 @@
             }
         }
 
+        let attrCount = 0;
         for (const [attrName, rawVal] of Object.entries(rawAttrs)) {
             if (typeof attrName !== 'string') continue;
+            if (attrCount >= MAX_SVG_ATTRS_PER_NODE) break;
+
             const lowerName = attrName.toLowerCase();
 
             // Strip event handlers
@@ -274,19 +307,34 @@
             if (/[\u0000-\u001F\u007F-\u009F]/.test(valStr)) continue;
             if (/javascript:|vbscript:|data:text\/html|expression\(|-moz-binding|@import/i.test(valStr)) continue;
 
+            if (lowerName === 'id') {
+                const trimmedId = valStr.trim();
+                if (/^[A-Za-z0-9_-]+$/.test(trimmedId)) {
+                    result['id'] = trimmedId;
+                    attrCount++;
+                }
+                continue;
+            }
+
             if (lowerName === 'style') {
-                const cleanStyle = sanitizeCssStyle(valStr);
+                const cleanStyle = sanitizeCssStyle(valStr, definedIds);
                 if (cleanStyle) {
                     result['style'] = cleanStyle;
+                    attrCount++;
                 }
             } else {
                 // Disallow external URLs in attributes (only allow safe local fragment references like url(#id))
                 if (/url\(/i.test(valStr)) {
-                    if (!/^url\s*\(\s*#[A-Za-z0-9_-]+\s*\)$/i.test(valStr)) {
+                    const urlMatch = valStr.match(/^url\s*\(\s*#([A-Za-z0-9_-]+)\s*\)$/i);
+                    if (!urlMatch) {
+                        continue;
+                    }
+                    if (definedIds && !definedIds.has(urlMatch[1])) {
                         continue;
                     }
                 }
                 result[attrName] = valStr;
+                attrCount++;
             }
         }
 
@@ -297,11 +345,17 @@
         return result;
     }
 
-    function serializeSvgTree(node, budget, isRoot = false) {
+    function serializeSvgTree(node, budget, definedIds, isRoot = false, depth = 0) {
         if (!node) return '';
+
+        budget.nodeCount++;
+        if (budget.nodeCount > budget.maxNodes || depth > budget.maxDepth) {
+            return null;
+        }
 
         if (node.nodeType === 3) {
             const text = node.nodeValue || node.textContent || '';
+            if (text.length > MAX_SVG_TEXT_PER_NODE) return null;
             const escaped = escapeXml(text);
             budget.bytes += escaped.length;
             if (budget.bytes > budget.maxBytes) return null;
@@ -313,11 +367,11 @@
         const tag = getTagName(node).toLowerCase();
         if (FORBIDDEN_SVG_TAGS.has(tag)) return '';
         if (!ALLOWED_SVG_TAGS.has(tag)) {
-            // Unrecognized tag (e.g. unknown wrapper element or <a>). Skip the container tag but serialize safe children
+            // Unrecognized tag. Skip the container tag but serialize safe children
             const children = getChildNodes(node);
             let innerStr = '';
             for (const child of children) {
-                const childResult = serializeSvgTree(child, budget, false);
+                const childResult = serializeSvgTree(child, budget, definedIds, false, depth + 1);
                 if (childResult === null) return null;
                 innerStr += childResult;
             }
@@ -326,7 +380,7 @@
 
         if (isRoot && tag !== 'svg') return null;
 
-        const attrs = getSanitizedSvgAttributes(node, isRoot);
+        const attrs = getSanitizedSvgAttributes(node, isRoot, definedIds);
         let attrStr = '';
         for (const [k, v] of Object.entries(attrs)) {
             attrStr += ` ${k}="${escapeXmlAttr(v)}"`;
@@ -336,7 +390,7 @@
         let innerStr = '';
 
         for (const child of children) {
-            const childResult = serializeSvgTree(child, budget, false);
+            const childResult = serializeSvgTree(child, budget, definedIds, false, depth + 1);
             if (childResult === null) return null;
             innerStr += childResult;
         }
@@ -375,17 +429,24 @@
                     if (parserError) return null;
                     rootSvgNode = doc.documentElement;
                 } catch {
-                    return null;
+                    // Fall back to simple parser if DOMParser fails or is mock
+                    rootSvgNode = null;
                 }
-            } else if (root && typeof root.parseHTML === 'function') {
+            }
+            if (!rootSvgNode && root && typeof root.parseHTML === 'function') {
                 try {
                     const doc = root.parseHTML(str);
                     rootSvgNode = doc.querySelector('svg');
                 } catch {
                     return null;
                 }
-            } else {
-                return null;
+            } else if (!rootSvgNode && typeof parseHTML === 'function') {
+                try {
+                    const doc = parseHTML(str);
+                    rootSvgNode = doc.querySelector('svg');
+                } catch {
+                    return null;
+                }
             }
         } else if (typeof svgInput === 'object' && svgInput.nodeType === 1) {
             rootSvgNode = svgInput;
@@ -395,8 +456,15 @@
             return null;
         }
 
-        const budget = { bytes: 0, maxBytes: MAX_SVG_BYTES };
-        const serialized = serializeSvgTree(rootSvgNode, budget, true);
+        const definedIds = collectDefinedSvgIds(rootSvgNode);
+        const budget = {
+            bytes: 0,
+            maxBytes: MAX_SVG_BYTES,
+            nodeCount: 0,
+            maxNodes: MAX_SVG_NODES,
+            maxDepth: MAX_SVG_DEPTH
+        };
+        const serialized = serializeSvgTree(rootSvgNode, budget, definedIds, true, 0);
 
         if (!serialized || budget.bytes > MAX_SVG_BYTES) return null;
 
@@ -408,11 +476,147 @@
         return serialized;
     }
 
+    function extractCodeLanguage(codeEl, preEl) {
+        let raw = '';
+        if (codeEl && codeEl.nodeType === 1) {
+            const dataLang = getAttribute(codeEl, 'data-language') ||
+                getAttribute(codeEl, 'data-lang') ||
+                getAttribute(codeEl, 'data-code-language');
+            if (dataLang && typeof dataLang === 'string') {
+                raw = dataLang.trim();
+            }
+            if (!raw) {
+                const cls = getAttribute(codeEl, 'class') || '';
+                const match = cls.match(/(?:^|\s)(?:language|lang)-([a-zA-Z0-9_+-]+)(?:\s|$)/i);
+                if (match) {
+                    raw = match[1];
+                }
+            }
+        }
+        if (!raw && preEl && preEl.nodeType === 1) {
+            const dataLang = getAttribute(preEl, 'data-language') ||
+                getAttribute(preEl, 'data-lang') ||
+                getAttribute(preEl, 'data-code-language');
+            if (dataLang && typeof dataLang === 'string') {
+                raw = dataLang.trim();
+            }
+            if (!raw) {
+                const cls = getAttribute(preEl, 'class') || '';
+                const match = cls.match(/(?:^|\s)(?:language|lang)-([a-zA-Z0-9_+-]+)(?:\s|$)/i);
+                if (match) {
+                    raw = match[1];
+                }
+            }
+        }
+        if (!raw) return '';
+        const cleaned = raw.toLowerCase().trim();
+        if (!/^[a-zA-Z0-9_+-]+$/.test(cleaned)) return '';
+        return cleaned;
+    }
+
+    function isMermaidCodeElement(el) {
+        if (!el || el.nodeType !== 1) return false;
+        const tag = getTagName(el);
+        if (tag === 'CODE') {
+            const parent = el.parentElement || el.parentNode;
+            const lang = extractCodeLanguage(el, parent && getTagName(parent) === 'PRE' ? parent : null);
+            return lang === 'mermaid' || lang === 'mermaid-diagram';
+        }
+        if (tag === 'PRE') {
+            const codeChildren = findDescendants(el, (c) => getTagName(c) === 'CODE');
+            const lang = extractCodeLanguage(codeChildren.length > 0 ? codeChildren[0] : null, el);
+            return lang === 'mermaid' || lang === 'mermaid-diagram';
+        }
+        return false;
+    }
+
+    function isRenderedMermaidSvg(node) {
+        if (!node || node.nodeType !== 1) return false;
+        if (getTagName(node) !== 'SVG') return false;
+        const id = getAttribute(node, 'id') || '';
+        if (/^(?:claude-)?mermaid(?:-[a-zA-Z0-9_-]+)?$/i.test(id)) return true;
+        const cls = getAttribute(node, 'class') || '';
+        if (/(?:^|\s)(?:claude-)?mermaid(?:-[a-zA-Z0-9_-]+)?(?:\s|$)/i.test(cls)) return true;
+        return false;
+    }
+
+    function isRenderedMermaidViewer(node) {
+        if (!node || node.nodeType !== 1) return false;
+        if (isRenderedMermaidSvg(node)) return true;
+
+        const cls = getAttribute(node, 'class') || '';
+        if (cls.includes('mermaid-viewer') || cls.includes('mermaid-container') || cls.includes('mermaid-wrapper')) {
+            const svgs = findDescendants(node, isRenderedMermaidSvg);
+            if (svgs.length > 0) return true;
+        }
+
+        return false;
+    }
+
+    function getPreviousElementSibling(el) {
+        if (!el) return null;
+        if (el.previousElementSibling !== undefined) return el.previousElementSibling;
+        const parent = el.parentNode || el.parentElement;
+        if (!parent || !parent.childNodes) return null;
+        const idx = parent.childNodes.indexOf(el);
+        for (let i = idx - 1; i >= 0; i--) {
+            if (parent.childNodes[i].nodeType === 1) return parent.childNodes[i];
+        }
+        return null;
+    }
+
+    function getNextElementSibling(el) {
+        if (!el) return null;
+        if (el.nextElementSibling !== undefined) return el.nextElementSibling;
+        const parent = el.parentNode || el.parentElement;
+        if (!parent || !parent.childNodes) return null;
+        const idx = parent.childNodes.indexOf(el);
+        for (let i = idx + 1; i < parent.childNodes.length; i++) {
+            if (parent.childNodes[i].nodeType === 1) return parent.childNodes[i];
+        }
+        return null;
+    }
+
     function extractMermaidSvgElement(node) {
         if (!node || node.nodeType !== 1) return null;
-        if (getTagName(node) === 'SVG') return node;
-        const svgs = findDescendants(node, (c) => getTagName(c) === 'SVG');
+        if (isRenderedMermaidSvg(node)) return node;
+        const svgs = findDescendants(node, isRenderedMermaidSvg);
         return svgs.length > 0 ? svgs[0] : null;
+    }
+
+    function hasLocalMermaidSource(node, rootNode) {
+        if (!node || node.nodeType !== 1) return false;
+
+        // Check inside node itself
+        const inside = findDescendants(node, isMermaidCodeElement);
+        if (inside.length > 0) return true;
+
+        // Check enclosing diagram wrapper / card (e.g. .mermaid-viewer, .diagram-container)
+        // But do not check the entire root document / body
+        let parent = node.parentNode || node.parentElement;
+        while (parent && parent !== rootNode) {
+            const parentTag = getTagName(parent);
+            if (parentTag === 'BODY' || parentTag === 'HTML') break;
+            const cls = getAttribute(parent, 'class') || '';
+            if (cls.includes('mermaid') || cls.includes('diagram') || cls.includes('chart')) {
+                const inWrapper = findDescendants(parent, isMermaidCodeElement);
+                if (inWrapper.length > 0) return true;
+            }
+            // Check immediate sibling code blocks
+            const prev = getPreviousElementSibling(parent);
+            if (prev && isMermaidCodeElement(prev)) return true;
+            const next = getNextElementSibling(parent);
+            if (next && isMermaidCodeElement(next)) return true;
+            break;
+        }
+
+        // Check immediate sibling code block of node
+        const prevNode = getPreviousElementSibling(node);
+        if (prevNode && (isMermaidCodeElement(prevNode) || findDescendants(prevNode, isMermaidCodeElement).length > 0)) return true;
+        const nextNode = getNextElementSibling(node);
+        if (nextNode && (isMermaidCodeElement(nextNode) || findDescendants(nextNode, isMermaidCodeElement).length > 0)) return true;
+
+        return false;
     }
 
     function shouldExcludeElement(el) {
@@ -421,7 +625,7 @@
 
         if (BLACKLISTED_TAGS.has(tag)) return true;
         if (tag === 'SVG') {
-            // Rendered Mermaid SVGs are handled by isRenderedMermaidViewer; exclude general/loose SVGs
+            // Rendered Mermaid SVGs are handled by isRenderedMermaidViewer; exclude general/unrelated SVGs
             return !isRenderedMermaidViewer(el);
         }
 
@@ -637,44 +841,6 @@
     function sanitizeAltText(text) {
         if (!text) return '';
         return String(text).replace(/[\r\n]+/g, ' ').replace(/[\[\]\\]/g, '\\$&').trim();
-    }
-
-    function isRenderedMermaidViewer(node) {
-        if (!node || node.nodeType !== 1) return false;
-        let classString = '';
-        if (typeof node.className === 'string') {
-            classString = node.className;
-        } else if (node.classList && typeof node.classList.contains === 'function') {
-            if (Array.isArray(node.classList)) {
-                classString = node.classList.join(' ');
-            } else if (node.classList instanceof Set) {
-                classString = Array.from(node.classList).join(' ');
-            }
-        }
-        if (!classString) {
-            const classAttr = getAttribute(node, 'class');
-            if (typeof classAttr === 'string') {
-                classString = classAttr;
-            }
-        }
-        const lowerClass = classString.toLowerCase();
-        if (lowerClass.includes('mermaid-viewer') || lowerClass.includes('mermaid-container') || lowerClass.includes('mermaid')) {
-            const svgChild = findDescendants(node, (child) => {
-                const tag = getTagName(child);
-                if (tag !== 'SVG') return false;
-                const id = getAttribute(child, 'id') || '';
-                return id.startsWith('claude-mermaid-') || id.includes('mermaid') || true;
-            });
-            return svgChild.length > 0;
-        }
-
-        const tag = getTagName(node);
-        if (tag === 'SVG') {
-            const id = getAttribute(node, 'id') || '';
-            return id.startsWith('claude-mermaid-') || id.includes('mermaid') || lowerClass.includes('mermaid');
-        }
-
-        return false;
     }
 
     function checkTraversalBudget(state) {
@@ -981,20 +1147,9 @@
 
         state.metadata.codeBlocksCount++;
         const codeChildren = findDescendants(preEl, (child) => getTagName(child) === 'CODE');
-        let lang = '';
-        let rawCode = '';
-
-        if (codeChildren.length > 0) {
-            const codeEl = codeChildren[0];
-            const cls = getAttribute(codeEl, 'class') || '';
-            const match = cls.match(/(?:language|lang)-([a-zA-Z0-9_-]+)/);
-            if (match) {
-                lang = match[1];
-            }
-            rawCode = codeEl.textContent || '';
-        } else {
-            rawCode = preEl.textContent || '';
-        }
+        const codeEl = codeChildren.length > 0 ? codeChildren[0] : null;
+        const lang = extractCodeLanguage(codeEl, preEl);
+        const rawCode = codeEl ? (codeEl.textContent || '') : (preEl.textContent || '');
 
         if (lang === 'mermaid' || lang === 'mermaid-diagram') {
             state.metadata.hasMermaidSource = true;
@@ -1022,19 +1177,24 @@
         if (node.nodeType !== 1) return '';
 
         if (isRenderedMermaidViewer(node)) {
-            const hasExplicitSource = Boolean(state.metadata.hasMermaidSource);
-            if (!hasExplicitSource) {
+            // Per-diagram source priority: only suppress SVG fallback if THIS diagram has explicit local source
+            const hasLocalSource = hasLocalMermaidSource(node, state.rootNode);
+            if (!hasLocalSource) {
                 const svgEl = extractMermaidSvgElement(node);
                 const sanitizedSvg = svgEl ? sanitizeSvg(svgEl) : null;
                 if (sanitizedSvg) {
                     state.diagramCount++;
                     const paddedIndex = String(state.diagramCount).padStart(2, '0');
                     const companionFilename = `${state.baseName}-diagram-${paddedIndex}.svg`;
-                    state.svgFiles.push({
+                    const asset = {
                         filename: companionFilename,
-                        svgContent: sanitizedSvg,
                         content: sanitizedSvg,
                         mimeType: 'image/svg+xml'
+                    };
+                    state.assets.push(asset);
+                    state.svgFiles.push({
+                        ...asset,
+                        svgContent: sanitizedSvg
                     });
                     state.metadata.hasSvgOnlyMermaid = true;
                     state.metadata.hasSvgFallback = true;
@@ -1135,7 +1295,9 @@
                 ok: false,
                 code: 'NO_ROOT',
                 markdown: '',
+                assets: [],
                 svgFiles: [],
+                svgArtifacts: [],
                 warnings: ['Root element is missing.'],
                 metadata: {}
             };
@@ -1145,17 +1307,8 @@
         const maxDepth = typeof options.maxDepth === 'number' ? options.maxDepth : MAX_DOM_DEPTH;
         const maxNodes = typeof options.maxNodes === 'number' ? options.maxNodes : MAX_DOM_NODES;
 
-        // Pre-scan for explicit Mermaid source code blocks before top-down traversal
-        const explicitMermaidSources = findDescendants(rootNode, (el) => {
-            if (!el || el.nodeType !== 1) return false;
-            const tag = getTagName(el);
-            if (tag === 'CODE') {
-                const cls = (getAttribute(el, 'class') || '').toLowerCase();
-                const lang = getAttribute(el, 'data-language') || getAttribute(el, 'data-lang') || '';
-                return cls.includes('language-mermaid') || cls.includes('lang-mermaid') || lang.toLowerCase() === 'mermaid';
-            }
-            return false;
-        });
+        // Pre-scan for explicit Mermaid source code blocks in document
+        const explicitMermaidSources = findDescendants(rootNode, isMermaidCodeElement);
 
         let docTitle = '';
         if (typeof options.title === 'string' && options.title.trim()) {
@@ -1181,6 +1334,8 @@
             maxChars,
             baseName,
             diagramCount: 0,
+            rootNode,
+            assets: [],
             svgFiles: [],
             budgetExceeded: false,
             outputBudgetExceeded: false,
@@ -1220,6 +1375,7 @@
         return {
             ok: true,
             markdown,
+            assets: state.assets,
             svgFiles: state.svgFiles,
             svgArtifacts: state.svgFiles,
             warnings: state.warnings,
@@ -1235,6 +1391,8 @@
         isSafeUrl,
         createSafeFence,
         escapeInlineCode,
+        extractCodeLanguage,
+        isRenderedMermaidViewer,
         shouldExcludeElement,
         MAX_MARKDOWN_CHARS,
         MAX_DOM_DEPTH,

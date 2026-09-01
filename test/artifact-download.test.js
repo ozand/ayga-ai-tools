@@ -522,10 +522,9 @@ describe('Artifact Download Module (AygaArtifactDownload)', () => {
                         ok: true,
                         code: 'CONVERTED_SUCCESS',
                         markdown: '# System Architecture\n\n![Diagram](System-Architecture-diagram-01.svg)\n',
-                        svgFiles: [
+                        assets: [
                             {
                                 filename: 'System-Architecture-diagram-01.svg',
-                                svgContent: '<svg xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="10" height="10"/></svg>',
                                 content: '<svg xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="10" height="10"/></svg>',
                                 mimeType: 'image/svg+xml'
                             }
@@ -701,6 +700,121 @@ describe('Artifact Download Module (AygaArtifactDownload)', () => {
             assert.equal(env.mockUrl.created.length, 0);
             assert.equal(statusText, 'Mermaid source is unavailable; rendered SVG was not converted.');
             assert.equal(statusColor, '#9b1c1c'); // error color
+        });
+
+        test('Atomic bundle download preflight rejects invalid bundle without partial downloads', () => {
+            const downloader = loadDownloader();
+            const env = createMockEnvironment();
+
+            // 1. Markdown references diagram-01.svg and diagram-02.svg, but assets only contains diagram-01.svg
+            const missingAssetPayload = {
+                markdown: '# Architecture\n\n![Diagram 1](diagram-01.svg)\n\n![Diagram 2](diagram-02.svg)\n',
+                assets: [
+                    {
+                        filename: 'diagram-01.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+                        mimeType: 'image/svg+xml'
+                    }
+                ]
+            };
+            const res1 = downloader.downloadArtifactBundle(missingAssetPayload, env);
+            assert.equal(res1.ok, false);
+            assert.equal(res1.code, 'BUNDLE_VALIDATION_FAILED');
+            assert.equal(env.clicks.length, 0, 'No clicks triggered on validation failure');
+            assert.equal(env.mockUrl.created.length, 0, 'No blobs/urls created on validation failure');
+
+            // 2. Unreferenced asset present in bundle
+            const unreferencedAssetPayload = {
+                markdown: '# Architecture\n\n![Diagram 1](diagram-01.svg)\n',
+                assets: [
+                    {
+                        filename: 'diagram-01.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+                        mimeType: 'image/svg+xml'
+                    },
+                    {
+                        filename: 'unreferenced-diagram.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><circle/></svg>',
+                        mimeType: 'image/svg+xml'
+                    }
+                ]
+            };
+            const res2 = downloader.downloadArtifactBundle(unreferencedAssetPayload, env);
+            assert.equal(res2.ok, false);
+            assert.equal(res2.code, 'BUNDLE_VALIDATION_FAILED');
+            assert.equal(env.clicks.length, 0);
+
+            // 3. Duplicate asset filenames
+            const duplicateAssetPayload = {
+                markdown: '# Architecture\n\n![Diagram 1](diagram-01.svg)\n',
+                assets: [
+                    {
+                        filename: 'diagram-01.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+                        mimeType: 'image/svg+xml'
+                    },
+                    {
+                        filename: 'diagram-01.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><circle/></svg>',
+                        mimeType: 'image/svg+xml'
+                    }
+                ]
+            };
+            const res3 = downloader.downloadArtifactBundle(duplicateAssetPayload, env);
+            assert.equal(res3.ok, false);
+            assert.equal(res3.code, 'BUNDLE_VALIDATION_FAILED');
+            assert.equal(env.clicks.length, 0);
+
+            // 4. Bad MIME type on asset
+            const badMimePayload = {
+                markdown: '# Architecture\n\n![Diagram 1](diagram-01.svg)\n',
+                assets: [
+                    {
+                        filename: 'diagram-01.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+                        mimeType: 'text/html'
+                    }
+                ]
+            };
+            const res4 = downloader.downloadArtifactBundle(badMimePayload, env);
+            assert.equal(res4.ok, false);
+            assert.equal(res4.code, 'BUNDLE_VALIDATION_FAILED');
+            assert.equal(env.clicks.length, 0);
+
+            // 5. Aggregate asset byte bound exceeded
+            const hugeAssetContent = '<svg xmlns="http://www.w3.org/2000/svg">' + 'a'.repeat(300 * 1024) + '</svg>';
+            const oversizedPayload = {
+                markdown: '# Architecture\n\n![Diagram 1](diagram-01.svg)\n',
+                assets: [
+                    {
+                        filename: 'diagram-01.svg',
+                        content: hugeAssetContent,
+                        mimeType: 'image/svg+xml'
+                    }
+                ]
+            };
+            const res5 = downloader.downloadArtifactBundle(oversizedPayload, env);
+            assert.equal(res5.ok, false);
+            assert.equal(res5.code, 'BUNDLE_VALIDATION_FAILED');
+            assert.equal(env.clicks.length, 0);
+
+            // 6. Valid bundle downloads atomically (Markdown + all assets)
+            const validPayload = {
+                markdown: '# Architecture\n\n![Diagram 1](diagram-01.svg)\n',
+                assets: [
+                    {
+                        filename: 'diagram-01.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+                        mimeType: 'image/svg+xml'
+                    }
+                ]
+            };
+            const res6 = downloader.downloadArtifactBundle(validPayload, env);
+            assert.equal(res6.ok, true);
+            assert.equal(env.clicks.length, 2);
+            assert.equal(env.clicks[0].download, 'artifact.md');
+            assert.equal(env.clicks[1].download, 'diagram-01.svg');
+            assert.equal(env.mockUrl.revoked.length, 2);
         });
     });
 });

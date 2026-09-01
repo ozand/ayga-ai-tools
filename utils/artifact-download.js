@@ -9,6 +9,8 @@
     const MAX_BASE_LENGTH = 120;
     const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
     const MAX_SVG_BYTES = 256 * 1024;
+    const MAX_ASSETS_COUNT = 64;
+    const MAX_AGGREGATE_ASSETS_BYTES = 1024 * 1024;
     const MIME_TYPE = 'text/markdown;charset=utf-8';
     const SVG_MIME_TYPE = 'image/svg+xml';
 
@@ -246,6 +248,21 @@
         return new BlobClass([svgContent], { type: SVG_MIME_TYPE });
     }
 
+    function extractReferencedSvgFilenames(markdown) {
+        if (typeof markdown !== 'string') return new Set();
+        const referenced = new Set();
+        const regex = /!\[[^\]]*\]\(([^)]+)\)/g;
+        let match;
+        while ((match = regex.exec(markdown)) !== null) {
+            const rawTarget = match[1].trim().split(/\s+/)[0];
+            const cleanTarget = rawTarget.replace(/^['"]|['"]$/g, '');
+            if (cleanTarget.toLowerCase().endsWith('.svg') && !/^[a-z]+:/i.test(cleanTarget) && !cleanTarget.startsWith('//')) {
+                referenced.add(cleanTarget);
+            }
+        }
+        return referenced;
+    }
+
     function downloadMarkdownArtifact(markdown, options = {}) {
         if (!isValidMarkdownContent(markdown)) {
             return {
@@ -324,10 +341,115 @@
         const targetDoc = options.document || (typeof document !== 'undefined' ? document : null);
         const mdFilename = deriveFilename(options.title || payload.metadata, targetDoc);
 
+        const assetList = payload.assets || payload.svgFiles || payload.svgArtifacts || [];
+        if (!Array.isArray(assetList)) {
+            return {
+                ok: false,
+                code: 'INVALID_ASSETS',
+                error: 'Assets must be an array.'
+            };
+        }
+
+        if (assetList.length > MAX_ASSETS_COUNT) {
+            return {
+                ok: false,
+                code: 'TOO_MANY_ASSETS',
+                error: `Asset count ${assetList.length} exceeds maximum ${MAX_ASSETS_COUNT}.`
+            };
+        }
+
+        // Preflight validation for all assets
+        const referencedFilenames = extractReferencedSvgFilenames(markdown);
+        const validatedAssets = [];
+        const seenFilenames = new Set();
+        let totalAssetBytes = 0;
+
+        for (let i = 0; i < assetList.length; i++) {
+            const item = assetList[i];
+            if (!item || typeof item !== 'object') {
+                return {
+                    ok: false,
+                    code: 'INVALID_ASSET_SHAPE',
+                    error: `Asset at index ${i} is not a valid object.`
+                };
+            }
+
+            const rawName = item.filename;
+            if (typeof rawName !== 'string' || !rawName.trim()) {
+                return {
+                    ok: false,
+                    code: 'INVALID_ASSET_FILENAME',
+                    error: `Asset at index ${i} has an invalid filename.`
+                };
+            }
+
+            const safeSvgName = sanitizeSvgFilename(rawName);
+            if (seenFilenames.has(safeSvgName)) {
+                return {
+                    ok: false,
+                    code: 'BUNDLE_VALIDATION_FAILED',
+                    error: `Duplicate asset filename detected: ${safeSvgName}`
+                };
+            }
+            seenFilenames.add(safeSvgName);
+
+            const content = typeof item.content === 'string' ? item.content : item.svgContent;
+            if (!isValidSvgContent(content)) {
+                return {
+                    ok: false,
+                    code: 'BUNDLE_VALIDATION_FAILED',
+                    error: `Asset ${safeSvgName} contains invalid SVG content.`
+                };
+            }
+
+            const mimeType = item.mimeType;
+            if (mimeType !== undefined && mimeType !== SVG_MIME_TYPE) {
+                return {
+                    ok: false,
+                    code: 'BUNDLE_VALIDATION_FAILED',
+                    error: `Asset ${safeSvgName} has invalid mimeType: ${mimeType}`
+                };
+            }
+
+            totalAssetBytes += content.length;
+            if (totalAssetBytes > MAX_AGGREGATE_ASSETS_BYTES) {
+                return {
+                    ok: false,
+                    code: 'BUNDLE_VALIDATION_FAILED',
+                    error: 'Aggregate asset byte limit exceeded.'
+                };
+            }
+
+            if (!referencedFilenames.has(safeSvgName) && !referencedFilenames.has(rawName)) {
+                return {
+                    ok: false,
+                    code: 'BUNDLE_VALIDATION_FAILED',
+                    error: `Asset ${safeSvgName} is not referenced in the Markdown document.`
+                };
+            }
+
+            validatedAssets.push({
+                filename: safeSvgName,
+                content
+            });
+        }
+
+        // Verify every referenced local SVG in Markdown maps to an asset in the bundle
+        for (const refName of referencedFilenames) {
+            const cleanRef = sanitizeSvgFilename(refName);
+            if (!seenFilenames.has(cleanRef) && !seenFilenames.has(refName)) {
+                return {
+                    ok: false,
+                    code: 'BUNDLE_VALIDATION_FAILED',
+                    error: `Referenced image ${refName} was not found in assets bundle.`
+                };
+            }
+        }
+
+        // Preflight passed! Now trigger atomic downloads
         const downloadedFiles = [];
         const errors = [];
 
-        // 1. Download Markdown artifact
         try {
             const mdBlob = createMarkdownBlob(markdown, options.Blob);
             const mdResult = triggerDownload(mdBlob, mdFilename, options);
@@ -342,26 +464,15 @@
             };
         }
 
-        // 2. Download SVG companion files if present
-        const svgFiles = Array.isArray(payload.svgFiles) ? payload.svgFiles : [];
         let svgCount = 0;
-
-        for (const svgFile of svgFiles) {
-            if (!svgFile || typeof svgFile.content !== 'string' || !isValidSvgContent(svgFile.content)) {
-                errors.push(`Skipped invalid SVG companion: ${svgFile && svgFile.filename}`);
-                continue;
-            }
-
-            const rawName = svgFile.filename || `diagram-${String(svgCount + 1).padStart(2, '0')}.svg`;
-            const safeSvgName = sanitizeSvgFilename(rawName);
-
+        for (const asset of validatedAssets) {
             try {
-                const svgBlob = createSvgBlob(svgFile.content, options.Blob);
-                const svgResult = triggerDownload(svgBlob, safeSvgName, options);
+                const svgBlob = createSvgBlob(asset.content, options.Blob);
+                const svgResult = triggerDownload(svgBlob, asset.filename, options);
                 downloadedFiles.push(svgResult.filename);
                 svgCount++;
             } catch (err) {
-                errors.push(`Failed to download ${safeSvgName}: ${err && err.message ? err.message : 'Unknown error'}`);
+                errors.push(`Failed to download ${asset.filename}: ${err && err.message ? err.message : 'Unknown error'}`);
             }
         }
 
@@ -386,12 +497,15 @@
         downloadMarkdownArtifact,
         downloadSvgCompanion,
         downloadArtifactBundle,
+        extractReferencedSvgFilenames,
         DEFAULT_FILENAME,
         DEFAULT_BASE_NAME,
         MAX_FILENAME_LENGTH,
         MAX_BASE_LENGTH,
         MAX_MARKDOWN_BYTES,
         MAX_SVG_BYTES,
+        MAX_ASSETS_COUNT,
+        MAX_AGGREGATE_ASSETS_BYTES,
         MIME_TYPE,
         SVG_MIME_TYPE
     });

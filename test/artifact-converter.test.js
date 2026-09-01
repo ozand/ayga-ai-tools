@@ -20,6 +20,8 @@ function loadConverter() {
         Set: globalThis.Set,
         Map: globalThis.Map,
         RegExp: globalThis.RegExp,
+        DOMParser: globalThis.DOMParser,
+        parseHTML,
         String: globalThis.String,
         Number: globalThis.Number,
         Boolean: globalThis.Boolean,
@@ -34,6 +36,7 @@ function loadConverter() {
 const converter = loadConverter();
 const {
     convertDomToMarkdown,
+    sanitizeSvg,
     createSafeFence,
     escapeInlineCode,
     sanitizeUrl,
@@ -182,7 +185,7 @@ test('Mermaid SVG-only detection is independent of DOM order and produces compan
     assert.ok(resSvgOnly.markdown.includes('![Diagram](Artifact-Frame-with-Rendered-SVG-Only-diagram-01.svg)'));
     assert.ok(!resSvgOnly.markdown.includes('<svg'));
 
-    // 2. Rendered SVG positioned BEFORE explicit source in DOM
+    // 2. Rendered SVG positioned BEFORE explicit source in DOM (for same diagram)
     const htmlSvgBeforeSource = `
       <div class="artifact-content">
         <div class="mermaid-viewer">
@@ -357,5 +360,70 @@ test('SVG sanitization handles malicious, malformed, and oversized SVGs', () => 
     const domOversized = parseHTML(oversizedHtml);
     const resOversized = convertDomToMarkdown(domOversized.querySelector('.artifact-content'), { document: domOversized });
     assert.equal(resOversized.svgArtifacts.length, 0); // Exceeded 256KB limit
+    assert.equal(resOversized.assets.length, 0);
     assert.ok(!resOversized.markdown.includes('![Diagram]('));
+});
+
+test('Sanitizer: rejects malicious/unsafe elements and drops styles/external references', () => {
+    const maliciousSvg = `
+      <svg id="claude-mermaid-x" viewBox="0 0 100 100">
+        <script>alert("xss")</script>
+        <foreignObject><div>HTML inside SVG</div></foreignObject>
+        <animate attributeName="opacity" from="0" to="1" dur="1s" />
+        <image href="http://malicious.com/tracker.png" />
+        <use href="#external-ref" />
+        <rect onclick="evil()" fill="red" width="50" height="50" style="background: url('http://evil.com')" />
+      </svg>
+    `;
+    const sanitized = sanitizeSvg(maliciousSvg);
+    assert.ok(sanitized, 'Sanitizer should return a sanitized string');
+    assert.ok(!sanitized.includes('<script'), 'Must not contain script tags');
+    assert.ok(!sanitized.includes('<foreignObject'), 'Must not contain foreignObject');
+    assert.ok(!sanitized.includes('<animate'), 'Must not contain animate');
+    assert.ok(!sanitized.includes('<image'), 'Must not contain image');
+    assert.ok(!sanitized.includes('<use'), 'Must not contain use');
+    assert.ok(!sanitized.includes('onclick'), 'Must not contain event handlers');
+    assert.ok(!sanitized.includes('style='), 'Must not contain style attributes');
+    assert.ok(!sanitized.includes('malicious.com'), 'Must not contain external URLs');
+    assert.ok(!sanitized.includes('evil.com'), 'Must not contain external URLs');
+    assert.ok(sanitized.includes('<rect'), 'Safe rect must be preserved');
+});
+
+test('Mixed document: mixed source Mermaid and sourceless rendered Mermaid in same document', () => {
+    const mixedHtml = `
+      <div class="artifact-content">
+        <h2>Architecture</h2>
+        <div class="code-block-wrapper">
+          <pre><code class="language-mermaid">graph TD; A-->B;</code></pre>
+        </div>
+        <h2>Flowchart (Rendered Only)</h2>
+        <div class="mermaid-viewer">
+          <svg id="claude-mermaid-workflow" width="200" height="100">
+            <rect x="0" y="0" width="50" height="50" />
+            <text x="10" y="20">Step 1</text>
+          </svg>
+        </div>
+        <h2>Unrelated Regular SVG</h2>
+        <div>
+          <svg class="icon" width="16" height="16">
+            <circle cx="8" cy="8" r="8" />
+          </svg>
+        </div>
+      </div>
+    `;
+    const dom = parseHTML(mixedHtml);
+    const result = convertDomToMarkdown(dom.querySelector('.artifact-content'), { document: dom, baseName: 'arch' });
+
+    assert.equal(result.ok, true);
+    // Explicit mermaid source block is exported as ```mermaid code fence
+    assert.ok(result.markdown.includes('```mermaid\ngraph TD; A-->B;\n```'));
+    // Sourceless rendered Mermaid viewer gets relative Markdown image link
+    assert.ok(result.markdown.includes('![Diagram](arch-diagram-01.svg)'));
+    // Exact assets array contains the single rendered companion
+    assert.equal(result.assets.length, 1);
+    assert.equal(result.assets[0].filename, 'arch-diagram-01.svg');
+    assert.equal(result.assets[0].mimeType, 'image/svg+xml');
+    assert.ok(result.assets[0].content.includes('<rect'));
+    // Unrelated SVG is NOT extracted as an asset
+    assert.ok(!result.markdown.includes('arch-diagram-02.svg'));
 });
