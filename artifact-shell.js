@@ -118,13 +118,12 @@
             Blob: typeof window !== 'undefined' && window.Blob ? window.Blob : (typeof Blob !== 'undefined' ? Blob : undefined)
         };
 
-        const assets = result.assets || result.svgFiles || result.svgArtifacts || [];
+        const assets = result.assets || [];
         let downloadOutcome;
         if (typeof downloader.downloadArtifactBundle === 'function') {
             downloadOutcome = downloader.downloadArtifactBundle({
                 markdown,
                 assets,
-                svgFiles: assets,
                 metadata: result.metadata
             }, downloadOptions);
         } else {

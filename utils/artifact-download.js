@@ -20,6 +20,17 @@
         'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
     ]);
 
+    function countUtf8Bytes(str) {
+        if (typeof str !== 'string') return 0;
+        if (typeof TextEncoder !== 'undefined') {
+            return new TextEncoder().encode(str).length;
+        }
+        if (typeof Buffer !== 'undefined') {
+            return Buffer.from(str, 'utf8').length;
+        }
+        return unescape(encodeURIComponent(str)).length;
+    }
+
     function sanitizeFilename(rawInput) {
         if (typeof rawInput !== 'string') {
             return DEFAULT_FILENAME;
@@ -229,8 +240,8 @@
 
     function isValidSvgContent(svgContent) {
         if (typeof svgContent !== 'string') return false;
-        const len = svgContent.length;
-        if (len === 0 || len > MAX_SVG_BYTES) return false;
+        const byteLen = countUtf8Bytes(svgContent);
+        if (byteLen === 0 || byteLen > MAX_SVG_BYTES) return false;
         if (!svgContent.trim()) return false;
         return true;
     }
@@ -341,7 +352,7 @@
         const targetDoc = options.document || (typeof document !== 'undefined' ? document : null);
         const mdFilename = deriveFilename(options.title || payload.metadata, targetDoc);
 
-        const assetList = payload.assets || payload.svgFiles || payload.svgArtifacts || [];
+        const assetList = payload.assets || [];
         if (!Array.isArray(assetList)) {
             return {
                 ok: false,
@@ -393,8 +404,8 @@
             }
             seenFilenames.add(safeSvgName);
 
-            const content = typeof item.content === 'string' ? item.content : item.svgContent;
-            if (!isValidSvgContent(content)) {
+            const content = item.content;
+            if (typeof content !== 'string' || !isValidSvgContent(content)) {
                 return {
                     ok: false,
                     code: 'BUNDLE_VALIDATION_FAILED',
@@ -411,7 +422,7 @@
                 };
             }
 
-            totalAssetBytes += content.length;
+            totalAssetBytes += countUtf8Bytes(content);
             if (totalAssetBytes > MAX_AGGREGATE_ASSETS_BYTES) {
                 return {
                     ok: false,
@@ -430,7 +441,8 @@
 
             validatedAssets.push({
                 filename: safeSvgName,
-                content
+                content,
+                mimeType: SVG_MIME_TYPE
             });
         }
 
@@ -476,12 +488,29 @@
             }
         }
 
+        if (errors.length > 0) {
+            return {
+                ok: false,
+                code: 'DOWNLOAD_FAILED',
+                error: errors.join('; '),
+                message: errors.join('; '),
+                filenames: downloadedFiles,
+                downloadedCount: downloadedFiles.length,
+                totalCount: 1 + validatedAssets.length,
+                markdownFilename: mdFilename,
+                svgCount,
+                errors
+            };
+        }
+
         return {
-            ok: errors.length === 0,
+            ok: true,
             filenames: downloadedFiles,
+            downloadedCount: downloadedFiles.length,
+            totalCount: 1 + validatedAssets.length,
             markdownFilename: mdFilename,
             svgCount,
-            errors
+            errors: []
         };
     }
 

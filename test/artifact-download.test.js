@@ -816,5 +816,53 @@ describe('Artifact Download Module (AygaArtifactDownload)', () => {
             assert.equal(env.clicks[1].download, 'diagram-01.svg');
             assert.equal(env.mockUrl.revoked.length, 2);
         });
+
+        test('Download bundle mid-sequence failure handling during click trigger', () => {
+            const downloader = loadDownloader();
+            const env = createMockEnvironment();
+
+            let clickCount = 0;
+            // Override document.createElement to simulate mid-sequence failure on the second click (asset)
+            const origCreate = env.document.createElement;
+            env.document.createElement = (tag) => {
+                const el = origCreate.call(env.document, tag);
+                if (tag === 'a') {
+                    const origClick = el.click;
+                    el.click = () => {
+                        clickCount++;
+                        if (clickCount === 2) {
+                            throw new Error('Platform download click dispatch failed mid-sequence');
+                        }
+                        origClick.call(el);
+                    };
+                }
+                return el;
+            };
+
+            const bundlePayload = {
+                markdown: '# Doc\n\n![Diagram 1](diagram-01.svg)\n\n![Diagram 2](diagram-02.svg)\n',
+                assets: [
+                    {
+                        filename: 'diagram-01.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+                        mimeType: 'image/svg+xml'
+                    },
+                    {
+                        filename: 'diagram-02.svg',
+                        content: '<svg xmlns="http://www.w3.org/2000/svg"><circle/></svg>',
+                        mimeType: 'image/svg+xml'
+                    }
+                ]
+            };
+
+            const outcome = downloader.downloadArtifactBundle(bundlePayload, env);
+            assert.equal(outcome.ok, false);
+            assert.equal(outcome.code, 'DOWNLOAD_FAILED');
+            assert.ok(outcome.error.includes('Platform download click dispatch failed mid-sequence'));
+            assert.equal(outcome.downloadedCount, 2);
+            assert.equal(outcome.totalCount, 3);
+            // All created object URLs should still be safely revoked
+            assert.equal(env.URL.revoked.length, 3);
+        });
     });
 });

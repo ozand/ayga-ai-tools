@@ -180,8 +180,8 @@ test('Mermaid SVG-only detection is independent of DOM order and produces compan
     const resSvgOnly = convertDomToMarkdown(domSvgOnly.querySelector('.artifact-content'), { document: domSvgOnly });
     assert.equal(resSvgOnly.metadata.hasSvgOnlyMermaid, true);
     assert.equal(resSvgOnly.metadata.hasMermaidSource, false);
-    assert.equal(resSvgOnly.svgArtifacts.length, 1);
-    assert.equal(resSvgOnly.svgArtifacts[0].filename, 'Artifact-Frame-with-Rendered-SVG-Only-diagram-01.svg');
+    assert.equal(resSvgOnly.assets.length, 1);
+    assert.equal(resSvgOnly.assets[0].filename, 'Artifact-Frame-with-Rendered-SVG-Only-diagram-01.svg');
     assert.ok(resSvgOnly.markdown.includes('![Diagram](Artifact-Frame-with-Rendered-SVG-Only-diagram-01.svg)'));
     assert.ok(!resSvgOnly.markdown.includes('<svg'));
 
@@ -198,7 +198,7 @@ test('Mermaid SVG-only detection is independent of DOM order and produces compan
     const resSvgBefore = convertDomToMarkdown(domSvgBefore.querySelector('.artifact-content'), { document: domSvgBefore });
     assert.equal(resSvgBefore.metadata.hasSvgOnlyMermaid, false);
     assert.equal(resSvgBefore.metadata.hasMermaidSource, true);
-    assert.equal(resSvgBefore.svgArtifacts.length, 0);
+    assert.equal(resSvgBefore.assets.length, 0);
     assert.ok(resSvgBefore.markdown.includes('```mermaid\ngraph TD\nA --> B\n```'));
     assert.ok(!resSvgBefore.markdown.includes('![Diagram]('));
 });
@@ -312,8 +312,8 @@ test('SVG sanitization handles malicious, malformed, and oversized SVGs', () => 
     `;
     const domMalicious = parseHTML(maliciousSvg);
     const resMalicious = convertDomToMarkdown(domMalicious.querySelector('.artifact-content'), { document: domMalicious });
-    assert.equal(resMalicious.svgArtifacts.length, 1);
-    const sanitized = resMalicious.svgArtifacts[0].content;
+    assert.equal(resMalicious.assets.length, 1);
+    const sanitized = resMalicious.assets[0].content;
     assert.ok(!sanitized.includes('script'));
     assert.ok(!sanitized.includes('onclick'));
     assert.ok(!sanitized.includes('onload'));
@@ -359,8 +359,7 @@ test('SVG sanitization handles malicious, malformed, and oversized SVGs', () => 
     `;
     const domOversized = parseHTML(oversizedHtml);
     const resOversized = convertDomToMarkdown(domOversized.querySelector('.artifact-content'), { document: domOversized });
-    assert.equal(resOversized.svgArtifacts.length, 0); // Exceeded 256KB limit
-    assert.equal(resOversized.assets.length, 0);
+    assert.equal(resOversized.assets.length, 0); // Exceeded 256KB limit
     assert.ok(!resOversized.markdown.includes('![Diagram]('));
 });
 

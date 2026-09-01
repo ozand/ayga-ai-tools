@@ -12,6 +12,17 @@
     const MAX_PER_ASSET_BYTES = 256 * 1024;
     const MAX_AGGREGATE_ASSETS_BYTES = 1024 * 1024;
 
+    function getUtf8ByteLength(str) {
+        if (typeof str !== 'string') return 0;
+        if (typeof Buffer !== 'undefined' && typeof Buffer.byteLength === 'function') {
+            return Buffer.byteLength(str, 'utf8');
+        }
+        if (typeof TextEncoder !== 'undefined') {
+            return new TextEncoder().encode(str).length;
+        }
+        return encodeURIComponent(str).replace(/%[A-F\d]{2}/g, 'U').length;
+    }
+
     function isPlainObject(value) {
         if (value === null || typeof value !== 'object') return false;
         const prototype = Object.getPrototypeOf(value);
@@ -86,16 +97,13 @@
     function isValidAsset(file) {
         if (!isPlainObject(file)) return false;
         const keys = Object.keys(file);
-        // Canonical shape has keys: filename, content, mimeType (and backward compat svgContent)
-        for (const k of keys) {
-            if (k !== 'filename' && k !== 'content' && k !== 'mimeType' && k !== 'svgContent') {
-                return false;
-            }
+        if (keys.length !== 3) return false;
+        if (!('filename' in file && 'content' in file && 'mimeType' in file)) {
+            return false;
         }
         if (typeof file.filename !== 'string' || file.filename.length === 0 || file.filename.length > 128) return false;
         if (!file.filename.endsWith('.svg') || !/^[A-Za-z0-9._-]+$/.test(file.filename) || file.filename.includes('..')) return false;
-        const content = typeof file.content === 'string' ? file.content : file.svgContent;
-        if (typeof content !== 'string' || content.length === 0 || content.length > MAX_PER_ASSET_BYTES) return false;
+        if (typeof file.content !== 'string' || file.content.length === 0 || getUtf8ByteLength(file.content) > MAX_PER_ASSET_BYTES) return false;
         if (file.mimeType !== 'image/svg+xml') return false;
         return true;
     }
@@ -109,9 +117,7 @@
         'warnings',
         'sourceAvailable',
         'mermaidSourceAvailable',
-        'assets',
-        'svgFiles',
-        'svgArtifacts'
+        'assets'
     ]);
 
     function isValidResult(result) {
@@ -131,26 +137,17 @@
         if (result.sourceAvailable !== undefined && typeof result.sourceAvailable !== 'boolean') return false;
         if (result.mermaidSourceAvailable !== undefined && typeof result.mermaidSourceAvailable !== 'boolean') return false;
 
-        const assetList = result.assets || result.svgFiles || result.svgArtifacts;
-        if (assetList !== undefined) {
-            if (!Array.isArray(assetList) || assetList.length > MAX_ASSETS_COUNT) return false;
+        if (result.assets !== undefined) {
+            if (!Array.isArray(result.assets) || result.assets.length > MAX_ASSETS_COUNT) return false;
             let totalBytes = 0;
             const filenames = new Set();
-            for (const item of assetList) {
+            for (const item of result.assets) {
                 if (!isValidAsset(item)) return false;
                 if (filenames.has(item.filename)) return false;
                 filenames.add(item.filename);
-                const content = typeof item.content === 'string' ? item.content : item.svgContent;
-                totalBytes += (content || '').length;
+                totalBytes += getUtf8ByteLength(item.content);
                 if (totalBytes > MAX_AGGREGATE_ASSETS_BYTES) return false;
             }
-        }
-
-        if (result.svgFiles !== undefined) {
-            if (!Array.isArray(result.svgFiles) || result.svgFiles.length > MAX_ASSETS_COUNT) return false;
-        }
-        if (result.svgArtifacts !== undefined) {
-            if (!Array.isArray(result.svgArtifacts) || result.svgArtifacts.length > MAX_ASSETS_COUNT) return false;
         }
 
         return true;
@@ -181,7 +178,7 @@
         isApprovedFrameHostname,
         isValidRequestId,
         isValidAsset,
-        isValidSvgFile: isValidAsset,
+        getUtf8ByteLength,
         hasSafeMessageSize,
         makeRequest,
         isValidRequest,

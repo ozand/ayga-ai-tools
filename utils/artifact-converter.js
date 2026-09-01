@@ -238,8 +238,14 @@
 
     function collectDefinedSvgIds(rootNode) {
         const definedIds = new Set();
-        function scan(node, depth = 0) {
-            if (!node || node.nodeType !== 1 || depth > MAX_SVG_DEPTH) return;
+        const stack = [{ node: rootNode, depth: 0 }];
+        let visited = 0;
+        while (stack.length > 0) {
+            visited++;
+            if (visited > MAX_SVG_NODES) break;
+            const { node, depth } = stack.pop();
+            if (!node || node.nodeType !== 1 || depth > MAX_SVG_DEPTH) continue;
+
             const idVal = getAttribute(node, 'id');
             if (idVal && typeof idVal === 'string') {
                 const trimmed = idVal.trim();
@@ -247,12 +253,12 @@
                     definedIds.add(trimmed);
                 }
             }
+
             const children = getChildNodes(node);
-            for (const child of children) {
-                scan(child, depth + 1);
+            for (let i = children.length - 1; i >= 0; i--) {
+                stack.push({ node: children[i], depth: depth + 1 });
             }
         }
-        scan(rootNode, 0);
         return definedIds;
     }
 
@@ -534,9 +540,9 @@
         if (!node || node.nodeType !== 1) return false;
         if (getTagName(node) !== 'SVG') return false;
         const id = getAttribute(node, 'id') || '';
-        if (/^(?:claude-)?mermaid(?:-[a-zA-Z0-9_-]+)?$/i.test(id)) return true;
+        if (/^claude-mermaid(?:-[a-zA-Z0-9_-]+)?$/i.test(id)) return true;
         const cls = getAttribute(node, 'class') || '';
-        if (/(?:^|\s)(?:claude-)?mermaid(?:-[a-zA-Z0-9_-]+)?(?:\s|$)/i.test(cls)) return true;
+        if (/(?:^|\s)claude-mermaid(?:-[a-zA-Z0-9_-]+)?(?:\s|$)/i.test(cls)) return true;
         return false;
     }
 
@@ -1192,10 +1198,6 @@
                         mimeType: 'image/svg+xml'
                     };
                     state.assets.push(asset);
-                    state.svgFiles.push({
-                        ...asset,
-                        svgContent: sanitizedSvg
-                    });
                     state.metadata.hasSvgOnlyMermaid = true;
                     state.metadata.hasSvgFallback = true;
                     state.metadata.mermaidCount++;
@@ -1296,8 +1298,6 @@
                 code: 'NO_ROOT',
                 markdown: '',
                 assets: [],
-                svgFiles: [],
-                svgArtifacts: [],
                 warnings: ['Root element is missing.'],
                 metadata: {}
             };
@@ -1336,7 +1336,6 @@
             diagramCount: 0,
             rootNode,
             assets: [],
-            svgFiles: [],
             budgetExceeded: false,
             outputBudgetExceeded: false,
             metadata: {
@@ -1376,8 +1375,6 @@
             ok: true,
             markdown,
             assets: state.assets,
-            svgFiles: state.svgFiles,
-            svgArtifacts: state.svgFiles,
             warnings: state.warnings,
             metadata: state.metadata
         };
