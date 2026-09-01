@@ -170,15 +170,17 @@ test('Converts explicit Mermaid source node to mermaid code fence', () => {
     assert.equal(result.metadata.hasSvgOnlyMermaid, false);
 });
 
-test('Mermaid SVG-only detection is independent of DOM order', () => {
+test('Mermaid SVG-only detection is independent of DOM order and produces companion SVG artifact', () => {
     // 1. Rendered SVG alone
     const htmlSvgOnly = loadFixture('artifact-frame-rendered-mermaid-svg-only.html');
     const domSvgOnly = parseHTML(htmlSvgOnly);
-    const resSvgOnly = convertDomToMarkdown(domSvgOnly.querySelector('.artifact-content'));
+    const resSvgOnly = convertDomToMarkdown(domSvgOnly.querySelector('.artifact-content'), { document: domSvgOnly });
     assert.equal(resSvgOnly.metadata.hasSvgOnlyMermaid, true);
     assert.equal(resSvgOnly.metadata.hasMermaidSource, false);
-    assert.ok(resSvgOnly.warnings[0].includes('Mermaid source is unavailable'));
-    assert.ok(resSvgOnly.markdown.includes('> [!WARNING]\n> Mermaid source is unavailable'));
+    assert.equal(resSvgOnly.svgArtifacts.length, 1);
+    assert.equal(resSvgOnly.svgArtifacts[0].filename, 'Artifact-Frame-with-Rendered-SVG-Only-diagram-01.svg');
+    assert.ok(resSvgOnly.markdown.includes('![Diagram](Artifact-Frame-with-Rendered-SVG-Only-diagram-01.svg)'));
+    assert.ok(!resSvgOnly.markdown.includes('<svg'));
 
     // 2. Rendered SVG positioned BEFORE explicit source in DOM
     const htmlSvgBeforeSource = `
@@ -190,11 +192,12 @@ test('Mermaid SVG-only detection is independent of DOM order', () => {
       </div>
     `;
     const domSvgBefore = parseHTML(htmlSvgBeforeSource);
-    const resSvgBefore = convertDomToMarkdown(domSvgBefore.querySelector('.artifact-content'));
+    const resSvgBefore = convertDomToMarkdown(domSvgBefore.querySelector('.artifact-content'), { document: domSvgBefore });
     assert.equal(resSvgBefore.metadata.hasSvgOnlyMermaid, false);
     assert.equal(resSvgBefore.metadata.hasMermaidSource, true);
+    assert.equal(resSvgBefore.svgArtifacts.length, 0);
     assert.ok(resSvgBefore.markdown.includes('```mermaid\ngraph TD\nA --> B\n```'));
-    assert.ok(!resSvgBefore.markdown.includes('> [!WARNING]'));
+    assert.ok(!resSvgBefore.markdown.includes('![Diagram]('));
 });
 
 test('Strips untrusted, script, style, hidden, and service UI elements', () => {
@@ -283,4 +286,76 @@ test('Enforces traversal budget and maximum DOM depth during recursion', () => {
     const resTrunc = convertDomToMarkdown(domLarge.querySelector('.artifact-content'), { maxChars: 50 });
     assert.ok(resTrunc.markdown.length <= 50);
     assert.ok(resTrunc.warnings.some(w => w.includes('limit reached')));
+});
+
+test('SVG sanitization handles malicious, malformed, and oversized SVGs', () => {
+    // Malicious SVG with script, event handlers, foreignObject, style tag, external image
+    const maliciousSvg = `
+      <div class="artifact-content">
+        <div class="mermaid-viewer">
+          <svg id="claude-mermaid-1" width="100" height="100" onclick="alert(1)">
+            <script>alert('xss')</script>
+            <style>body { background: red; }</style>
+            <foreignObject width="100" height="100"><iframe src="http://evil.com"></iframe></foreignObject>
+            <image href="http://evil.com/leak.png" />
+            <a xlink:href="javascript:alert(2)"><text>Click</text></a>
+            <g class="nodes" onload="steal()">
+              <rect x="0" y="0" width="50" height="50" style="behavior: url(xss.htc); fill: blue;"></rect>
+              <text x="10" y="20">Safe Text</text>
+            </g>
+          </svg>
+        </div>
+      </div>
+    `;
+    const domMalicious = parseHTML(maliciousSvg);
+    const resMalicious = convertDomToMarkdown(domMalicious.querySelector('.artifact-content'), { document: domMalicious });
+    assert.equal(resMalicious.svgArtifacts.length, 1);
+    const sanitized = resMalicious.svgArtifacts[0].content;
+    assert.ok(!sanitized.includes('script'));
+    assert.ok(!sanitized.includes('onclick'));
+    assert.ok(!sanitized.includes('onload'));
+    assert.ok(!sanitized.includes('foreignObject'));
+    assert.ok(!sanitized.includes('evil.com'));
+    assert.ok(!sanitized.includes('javascript:'));
+    assert.ok(!sanitized.includes('<style'));
+    assert.ok(!sanitized.includes('behavior:'));
+    assert.ok(sanitized.includes('<svg'));
+    assert.ok(sanitized.includes('<rect'));
+    assert.ok(sanitized.includes('<text'));
+    assert.ok(sanitized.includes('Safe Text'));
+    assert.ok(sanitized.includes('fill: blue;'));
+
+    // Malformed / Unbalanced SVG
+    const malformedHtml = `
+      <div class="artifact-content">
+        <div class="mermaid-viewer">
+          <svg id="claude-mermaid-2" width="100" height="100">
+            <g><rect>
+          </svg>
+        </div>
+      </div>
+    `;
+    const domMalformed = parseHTML(malformedHtml);
+    const resMalformed = convertDomToMarkdown(domMalformed.querySelector('.artifact-content'), { document: domMalformed });
+    // Should still produce well-formed sanitized XML or reject gracefully without crashing
+    assert.ok(resMalformed.markdown);
+
+    // Oversized SVG (exceeding 256KB)
+    let largeInner = '';
+    for (let i = 0; i < 6000; i++) {
+        largeInner += `<rect x="${i}" y="${i}" width="10" height="10" />`;
+    }
+    const oversizedHtml = `
+      <div class="artifact-content">
+        <div class="mermaid-viewer">
+          <svg id="claude-mermaid-3" width="100" height="100">
+            ${largeInner}
+          </svg>
+        </div>
+      </div>
+    `;
+    const domOversized = parseHTML(oversizedHtml);
+    const resOversized = convertDomToMarkdown(domOversized.querySelector('.artifact-content'), { document: domOversized });
+    assert.equal(resOversized.svgArtifacts.length, 0); // Exceeded 256KB limit
+    assert.ok(!resOversized.markdown.includes('![Diagram]('));
 });

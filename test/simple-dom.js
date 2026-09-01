@@ -262,7 +262,8 @@ class SimpleDocument extends SimpleNode {
 
 const VOID_ELEMENTS = new Set([
     'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-    'link', 'meta', 'param', 'source', 'track', 'wbr'
+    'link', 'meta', 'param', 'source', 'track', 'wbr',
+    'circle', 'ellipse', 'line', 'path', 'polygon', 'polyline', 'rect', 'stop', 'use'
 ]);
 
 const RAW_TEXT_ELEMENTS = new Set([
@@ -320,11 +321,15 @@ export function parseHTML(htmlString) {
             }
 
             // Opening tag
-            const tagMatch = htmlString.slice(pos).match(/^<([a-zA-Z0-9-]+)(\s[^>]*)?(\/?)>/);
+            const tagMatch = htmlString.slice(pos).match(/^<([a-zA-Z0-9-]+)((?:\s+[^>]*?)?)(\/?)>/);
             if (tagMatch) {
                 const tagName = tagMatch[1].toLowerCase();
-                const rawAttrs = tagMatch[2] || '';
-                const isSelfClosing = tagMatch[3] === '/' || VOID_ELEMENTS.has(tagName);
+                let rawAttrs = tagMatch[2] || '';
+                let isSelfClosing = tagMatch[3] === '/' || VOID_ELEMENTS.has(tagName);
+                if (rawAttrs.endsWith('/')) {
+                    rawAttrs = rawAttrs.slice(0, -1);
+                    isSelfClosing = true;
+                }
                 pos += tagMatch[0].length;
 
                 const elem = new SimpleElement(tagName);

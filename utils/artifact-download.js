@@ -8,7 +8,9 @@
     const MAX_FILENAME_LENGTH = 128;
     const MAX_BASE_LENGTH = 120;
     const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
+    const MAX_SVG_BYTES = 256 * 1024;
     const MIME_TYPE = 'text/markdown;charset=utf-8';
+    const SVG_MIME_TYPE = 'image/svg+xml';
 
     const RESERVED_WINDOWS_NAMES = new Set([
         'CON', 'PRN', 'AUX', 'NUL',
@@ -129,7 +131,12 @@
             throw new Error('URL.createObjectURL / revokeObjectURL is not available.');
         }
 
-        const safeFilename = sanitizeFilename(filename);
+        let safeFilename;
+        if (filename.toLowerCase().endsWith('.svg')) {
+            safeFilename = sanitizeSvgFilename(filename);
+        } else {
+            safeFilename = sanitizeFilename(filename);
+        }
         const objectUrl = urlApi.createObjectURL(blob);
         let anchor = null;
         let attached = false;
@@ -179,6 +186,66 @@
         }
     }
 
+    function sanitizeSvgFilename(rawInput, defaultFallback = 'diagram.svg') {
+        if (typeof rawInput !== 'string') {
+            return defaultFallback;
+        }
+
+        let input = rawInput.normalize('NFC').trim();
+        if (!input) {
+            return defaultFallback;
+        }
+
+        while (/\.svg$/i.test(input)) {
+            input = input.replace(/\.svg$/i, '').trim();
+        }
+
+        input = input.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '');
+        input = input.replace(/[\\/:*?"<>|]+/g, ' ');
+        input = input.replace(/\s+/g, ' ').trim();
+        input = input.replace(/^[.\s]+|[.\s]+$/g, '');
+
+        if (!input) {
+            return defaultFallback;
+        }
+
+        const baseUpper = input.toUpperCase().split('.')[0];
+        if (RESERVED_WINDOWS_NAMES.has(baseUpper)) {
+            input = `diagram-${input}`;
+        }
+
+        if (input.length > MAX_BASE_LENGTH) {
+            input = input.slice(0, MAX_BASE_LENGTH).replace(/[.\s]+$/, '');
+        }
+
+        if (!input) {
+            return defaultFallback;
+        }
+
+        return `${input}.svg`;
+    }
+
+    function isValidSvgContent(svgContent) {
+        if (typeof svgContent !== 'string') return false;
+        const len = svgContent.length;
+        if (len === 0 || len > MAX_SVG_BYTES) return false;
+        if (!svgContent.trim()) return false;
+        return true;
+    }
+
+    function createSvgBlob(svgContent, customBlobConstructor) {
+        if (!isValidSvgContent(svgContent)) {
+            throw new TypeError('Invalid SVG content: must be a non-empty string within size limits.');
+        }
+
+        const BlobClass = customBlobConstructor || (typeof Blob !== 'undefined' ? Blob : null);
+        if (!BlobClass) {
+            throw new Error('Blob constructor is not available in the current environment.');
+        }
+
+        return new BlobClass([svgContent], { type: SVG_MIME_TYPE });
+    }
+
     function downloadMarkdownArtifact(markdown, options = {}) {
         if (!isValidMarkdownContent(markdown)) {
             return {
@@ -208,18 +275,124 @@
         }
     }
 
+    function downloadSvgCompanion(svgContent, filename, options = {}) {
+        if (!isValidSvgContent(svgContent)) {
+            return {
+                ok: false,
+                code: 'INVALID_SVG',
+                error: 'SVG content is empty or invalid.'
+            };
+        }
+
+        const safeFilename = sanitizeSvgFilename(filename);
+
+        try {
+            const blob = createSvgBlob(svgContent, options.Blob);
+            const downloadResult = triggerDownload(blob, safeFilename, options);
+            return {
+                ok: true,
+                filename: downloadResult.filename,
+                size: downloadResult.size
+            };
+        } catch (err) {
+            return {
+                ok: false,
+                code: 'DOWNLOAD_FAILED',
+                error: err && err.message ? err.message : 'Local download of SVG companion failed.'
+            };
+        }
+    }
+
+    function downloadArtifactBundle(payload, options = {}) {
+        if (!payload || typeof payload !== 'object') {
+            return {
+                ok: false,
+                code: 'INVALID_PAYLOAD',
+                error: 'Invalid payload provided for bundle download.'
+            };
+        }
+
+        const markdown = payload.markdown;
+        if (!isValidMarkdownContent(markdown)) {
+            return {
+                ok: false,
+                code: 'INVALID_MARKDOWN',
+                error: 'Markdown content is empty or invalid.'
+            };
+        }
+
+        const targetDoc = options.document || (typeof document !== 'undefined' ? document : null);
+        const mdFilename = deriveFilename(options.title || payload.metadata, targetDoc);
+
+        const downloadedFiles = [];
+        const errors = [];
+
+        // 1. Download Markdown artifact
+        try {
+            const mdBlob = createMarkdownBlob(markdown, options.Blob);
+            const mdResult = triggerDownload(mdBlob, mdFilename, options);
+            downloadedFiles.push(mdResult.filename);
+        } catch (err) {
+            return {
+                ok: false,
+                code: 'DOWNLOAD_FAILED',
+                error: err && err.message ? err.message : 'Failed to download Markdown file.',
+                filenames: downloadedFiles,
+                errors: [err && err.message ? err.message : 'Markdown download error']
+            };
+        }
+
+        // 2. Download SVG companion files if present
+        const svgFiles = Array.isArray(payload.svgFiles) ? payload.svgFiles : [];
+        let svgCount = 0;
+
+        for (const svgFile of svgFiles) {
+            if (!svgFile || typeof svgFile.content !== 'string' || !isValidSvgContent(svgFile.content)) {
+                errors.push(`Skipped invalid SVG companion: ${svgFile && svgFile.filename}`);
+                continue;
+            }
+
+            const rawName = svgFile.filename || `diagram-${String(svgCount + 1).padStart(2, '0')}.svg`;
+            const safeSvgName = sanitizeSvgFilename(rawName);
+
+            try {
+                const svgBlob = createSvgBlob(svgFile.content, options.Blob);
+                const svgResult = triggerDownload(svgBlob, safeSvgName, options);
+                downloadedFiles.push(svgResult.filename);
+                svgCount++;
+            } catch (err) {
+                errors.push(`Failed to download ${safeSvgName}: ${err && err.message ? err.message : 'Unknown error'}`);
+            }
+        }
+
+        return {
+            ok: errors.length === 0,
+            filenames: downloadedFiles,
+            markdownFilename: mdFilename,
+            svgCount,
+            errors
+        };
+    }
+
     root.AygaArtifactDownload = Object.freeze({
         sanitizeFilename,
+        sanitizeSvgFilename,
         deriveFilename,
         isValidMarkdownContent,
+        isValidSvgContent,
         createMarkdownBlob,
+        createSvgBlob,
         triggerDownload,
         downloadMarkdownArtifact,
+        downloadSvgCompanion,
+        downloadArtifactBundle,
         DEFAULT_FILENAME,
         DEFAULT_BASE_NAME,
         MAX_FILENAME_LENGTH,
         MAX_BASE_LENGTH,
         MAX_MARKDOWN_BYTES,
-        MIME_TYPE
+        MAX_SVG_BYTES,
+        MIME_TYPE,
+        SVG_MIME_TYPE
     });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

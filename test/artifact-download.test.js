@@ -456,6 +456,136 @@ describe('Artifact Download Module (AygaArtifactDownload)', () => {
             assert.equal(statusColor, '#202123'); // success color
         });
 
+        test('successful bridge response with companion SVGs triggers multiple downloads with cleanup', async () => {
+            const bridge = loadBridge();
+            const downloader = loadDownloader();
+            const env = createMockEnvironment({ documentTitle: 'Claude' });
+
+            let buttonClickListener = null;
+            let statusText = '';
+            let statusColor = '';
+
+            const shellDoc = {
+                title: 'Claude',
+                body: {
+                    appendChild(elem) {},
+                    removeChild(elem) { return env.document.body.removeChild(elem); }
+                },
+                documentElement: {},
+                querySelector(sel) {
+                    if (sel.includes('iframe#frame-content')) {
+                        return {
+                            isConnected: true,
+                            classList: { contains: (cls) => cls === 'ready' },
+                            src: 'https://01932b12-9c34-7a1b-8f12-3456789abcde.frame.claudeusercontent.com/artifact',
+                            contentWindow: mockFrameWithSvgWindow
+                        };
+                    }
+                    if (sel.includes('[data-ayga-artifact-export]')) return null;
+                    if (sel.includes('[data-ayga-artifact-status]')) {
+                        return {
+                            dataset: {},
+                            style: {
+                                set background(val) { statusColor = val; }
+                            },
+                            set textContent(val) { statusText = val; }
+                        };
+                    }
+                    return null;
+                },
+                createElement(tag) {
+                    if (tag === 'button') {
+                        return {
+                            dataset: {},
+                            style: {},
+                            set disabled(val) {},
+                            addEventListener(evt, handler) {
+                                if (evt === 'click') buttonClickListener = handler;
+                            }
+                        };
+                    }
+                    if (tag === 'a') {
+                        return env.document.createElement('a');
+                    }
+                    return {
+                        dataset: {},
+                        style: {},
+                        set textContent(val) { statusText = val; }
+                    };
+                }
+            };
+
+            const shellListeners = [];
+            const mockFrameWithSvgWindow = {
+                postMessage(req, origin) {
+                    const resp = bridge.makeResponse(req.requestId, {
+                        ok: true,
+                        code: 'CONVERTED_SUCCESS',
+                        markdown: '# System Architecture\n\n![Diagram](System-Architecture-diagram-01.svg)\n',
+                        svgFiles: [
+                            {
+                                filename: 'System-Architecture-diagram-01.svg',
+                                svgContent: '<svg xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="10" height="10"/></svg>',
+                                content: '<svg xmlns="http://www.w3.org/2000/svg"><rect x="0" y="0" width="10" height="10"/></svg>',
+                                mimeType: 'image/svg+xml'
+                            }
+                        ],
+                        metadata: {
+                            title: 'System Architecture',
+                            hasSvgOnlyMermaid: true
+                        }
+                    });
+                    for (const l of shellListeners) {
+                        l({
+                            source: mockFrameWithSvgWindow,
+                            origin: 'https://01932b12-9c34-7a1b-8f12-3456789abcde.frame.claudeusercontent.com',
+                            data: resp
+                        });
+                    }
+                }
+            };
+
+            const shellContext = {
+                location: { origin: 'https://claude.ai', pathname: '/code/artifact/test-artifact' },
+                window: {
+                    top: null,
+                    addEventListener(evt, l) { if (evt === 'message') shellListeners.push(l); },
+                    removeEventListener(evt, l) {
+                        const idx = shellListeners.indexOf(l);
+                        if (idx !== -1) shellListeners.splice(idx, 1);
+                    },
+                    URL: env.URL,
+                    Blob: env.Blob
+                },
+                document: shellDoc,
+                MutationObserver: class {
+                    observe() {}
+                },
+                globalThis: {
+                    AygaArtifactBridge: bridge,
+                    AygaArtifactDownload: downloader
+                },
+                URL: env.URL,
+                Blob: env.Blob,
+                setTimeout,
+                clearTimeout
+            };
+            shellContext.window.top = shellContext.window;
+
+            vm.runInNewContext(fs.readFileSync(path.join(root, 'artifact-shell.js'), 'utf8'), shellContext);
+
+            assert.ok(buttonClickListener, 'Export button click handler registered');
+            await buttonClickListener();
+
+            // Check download occurred for both markdown and SVG
+            assert.equal(env.clicks.length, 2);
+            assert.equal(env.clicks[0].download, 'System Architecture.md');
+            assert.equal(env.clicks[1].download, 'System-Architecture-diagram-01.svg');
+            assert.equal(env.mockUrl.revoked.length, 2);
+            assert.equal(statusText, 'Exported System Architecture.md and 1 diagram companion(s)');
+            assert.equal(statusColor, '#202123'); // success color
+        });
+
         test('malformed/error bridge response never triggers download and displays safe status', async () => {
             const bridge = loadBridge();
             const downloader = loadDownloader();

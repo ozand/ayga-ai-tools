@@ -69,12 +69,15 @@
                 };
             }
 
-            if (conversion.metadata && conversion.metadata.hasSvgOnlyMermaid) {
+            const svgFiles = Array.isArray(conversion.svgFiles) ? conversion.svgFiles : [];
+
+            if (conversion.metadata && conversion.metadata.hasSvgOnlyMermaid && svgFiles.length === 0) {
                 // Preserve safe prose/code Markdown while reporting the omitted renderer output.
                 return {
                     ok: true,
                     code: 'CONVERTED_WITH_WARNINGS',
                     markdown: conversion.markdown,
+                    svgFiles: [],
                     metadata: conversion.metadata,
                     warnings: conversion.warnings,
                     sourceAvailable: true,
@@ -86,10 +89,12 @@
                 ok: true,
                 code: 'CONVERTED_SUCCESS',
                 markdown: conversion.markdown,
+                svgFiles,
+                svgArtifacts: svgFiles,
                 metadata: conversion.metadata,
                 warnings: conversion.warnings,
                 sourceAvailable: true,
-                mermaidSourceAvailable: !conversion.metadata.hasSvgOnlyMermaid
+                mermaidSourceAvailable: Boolean(conversion.metadata && conversion.metadata.hasMermaidSource)
             };
         }
 

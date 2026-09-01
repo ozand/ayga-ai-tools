@@ -106,24 +106,39 @@
             return false;
         }
 
-        if (!downloader || typeof downloader.downloadMarkdownArtifact !== 'function') {
+        if (!downloader || (typeof downloader.downloadArtifactBundle !== 'function' && typeof downloader.downloadMarkdownArtifact !== 'function')) {
             showStatus('Download module is unavailable.', true);
             return false;
         }
 
-        const downloadOutcome = downloader.downloadMarkdownArtifact(markdown, {
+        const downloadOptions = {
             metadata: result.metadata,
             document,
             URL: typeof window !== 'undefined' && window.URL ? window.URL : (typeof URL !== 'undefined' ? URL : undefined),
             Blob: typeof window !== 'undefined' && window.Blob ? window.Blob : (typeof Blob !== 'undefined' ? Blob : undefined)
-        });
+        };
+
+        let downloadOutcome;
+        if (typeof downloader.downloadArtifactBundle === 'function') {
+            downloadOutcome = downloader.downloadArtifactBundle({
+                markdown,
+                svgFiles: result.svgFiles,
+                metadata: result.metadata
+            }, downloadOptions);
+        } else {
+            downloadOutcome = downloader.downloadMarkdownArtifact(markdown, downloadOptions);
+        }
 
         if (!downloadOutcome.ok) {
             showStatus(downloadOutcome.error || 'Failed to download Markdown file.', true);
             return false;
         }
 
-        showStatus(`Exported ${downloadOutcome.filename}`, false);
+        if (downloadOutcome.svgCount && downloadOutcome.svgCount > 0) {
+            showStatus(`Exported ${downloadOutcome.markdownFilename || downloadOutcome.filename} and ${downloadOutcome.svgCount} diagram companion(s)`, false);
+        } else {
+            showStatus(`Exported ${downloadOutcome.markdownFilename || downloadOutcome.filename}`, false);
+        }
         return true;
     }
 

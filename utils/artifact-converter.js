@@ -7,6 +7,7 @@
     const MAX_DOM_DEPTH = 32;
     const MAX_DOM_NODES = 10000;
     const MAX_WARNINGS = 50;
+    const MAX_SVG_BYTES = 256 * 1024; // 256 KB limit for SVG diagrams
 
     const BLACKLISTED_TAGS = new Set([
         'SCRIPT',
@@ -18,6 +19,52 @@
         'OBJECT',
         'EMBED',
         'APPLET'
+    ]);
+
+    const ALLOWED_SVG_TAGS = new Set([
+        'svg', 'g', 'path', 'rect', 'circle', 'ellipse',
+        'line', 'polyline', 'polygon', 'text', 'tspan',
+        'textpath', 'defs', 'marker', 'lineargradient',
+        'radialgradient', 'stop', 'clippath', 'pattern',
+        'desc', 'title'
+    ]);
+
+    const FORBIDDEN_SVG_TAGS = new Set([
+        'script', 'style', 'foreignobject', 'animate',
+        'animatemotion', 'animatetransform', 'animatecolor',
+        'set', 'discard', 'use', 'image', 'iframe', 'frame',
+        'object', 'embed', 'audio', 'video', 'link', 'a',
+        'meta', 'html', 'body', 'head'
+    ]);
+
+    const ALLOWED_SVG_ATTRS = new Set([
+        'xmlns', 'viewbox', 'width', 'height', 'x', 'y', 'x1', 'y1', 'x2', 'y2',
+        'cx', 'cy', 'r', 'rx', 'ry', 'd', 'points', 'dx', 'dy', 'transform',
+        'fill', 'fill-opacity', 'fill-rule', 'stroke', 'stroke-width', 'stroke-linecap',
+        'stroke-linejoin', 'stroke-miterlimit', 'stroke-dasharray', 'stroke-dashoffset',
+        'stroke-opacity', 'opacity', 'color', 'visibility', 'display',
+        'font-family', 'font-size', 'font-weight', 'font-style', 'text-anchor',
+        'dominant-baseline', 'alignment-baseline', 'letter-spacing', 'word-spacing', 'direction',
+        'id', 'class', 'version', 'marker-start', 'marker-mid', 'marker-end',
+        'clip-path', 'mask', 'patternunits', 'patterncontentunits',
+        'gradientunits', 'gradienttransform', 'offset', 'stop-color', 'stop-opacity',
+        'style'
+    ]);
+
+    const ALLOWED_STYLE_PROPERTIES = new Set([
+        'fill', 'fill-opacity', 'fill-rule',
+        'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'stroke-miterlimit',
+        'stroke-dasharray', 'stroke-dashoffset', 'stroke-opacity',
+        'opacity', 'color', 'visibility', 'display',
+        'font-family', 'font-size', 'font-weight', 'font-style',
+        'text-anchor', 'dominant-baseline', 'alignment-baseline',
+        'letter-spacing', 'word-spacing'
+    ]);
+
+    const RESERVED_WINDOWS_NAMES = new Set([
+        'CON', 'PRN', 'AUX', 'NUL',
+        'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+        'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'
     ]);
 
     const EXCLUDED_ROLES = new Set([
@@ -80,16 +127,10 @@
 
     function getChildNodes(node) {
         if (!node) return [];
-        if (node.childNodes && Array.isArray(node.childNodes)) {
-            return node.childNodes;
-        }
-        if (node.childNodes && typeof node.childNodes.length === 'number') {
+        if (node.childNodes) {
             return Array.from(node.childNodes);
         }
-        if (node.children && Array.isArray(node.children)) {
-            return node.children;
-        }
-        if (node.children && typeof node.children.length === 'number') {
+        if (node.children) {
             return Array.from(node.children);
         }
         return [];
@@ -106,12 +147,283 @@
         return results;
     }
 
+    function escapeXml(str) {
+        if (typeof str !== 'string') return '';
+        return str
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&apos;');
+    }
+
+    function escapeXmlAttr(str) {
+        if (typeof str !== 'string') return '';
+        return str
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    function sanitizeBaseName(rawInput) {
+        if (typeof rawInput !== 'string') return 'artifact';
+        let input = rawInput.normalize('NFC').trim();
+        if (!input) return 'artifact';
+
+        while (/\.(md|markdown|html|htm|svg)$/i.test(input)) {
+            input = input.replace(/\.(md|markdown|html|htm|svg)$/i, '').trim();
+        }
+
+        input = input.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '');
+        input = input.replace(/[\\/:*?"<>|]+/g, ' ');
+        input = input.replace(/\s+/g, '-').trim();
+        input = input.replace(/^[.\s-]+|[.\s-]+$/g, '');
+
+        if (!input) return 'artifact';
+
+        const baseUpper = input.toUpperCase().split('.')[0];
+        if (RESERVED_WINDOWS_NAMES.has(baseUpper)) {
+            input = `artifact-${input}`;
+        }
+
+        if (input.length > 100) {
+            input = input.slice(0, 100).replace(/[.\s-]+$/, '');
+        }
+
+        return input || 'artifact';
+    }
+
+    function sanitizeCssStyle(rawStyle) {
+        if (typeof rawStyle !== 'string') return '';
+        const style = rawStyle.trim();
+        if (!style) return '';
+
+        const declarations = style.split(';');
+        const safeDecls = [];
+
+        for (const decl of declarations) {
+            const trimmed = decl.trim();
+            if (!trimmed) continue;
+            const colonIdx = trimmed.indexOf(':');
+            if (colonIdx === -1) continue;
+
+            const prop = trimmed.slice(0, colonIdx).trim().toLowerCase();
+            const val = trimmed.slice(colonIdx + 1).trim();
+
+            if (!ALLOWED_STYLE_PROPERTIES.has(prop)) continue;
+            if (/[\u0000-\u001F\u007F-\u009F]/.test(val)) continue;
+            if (/javascript:|vbscript:|expression\(|@import|-moz-binding|<|>/i.test(val)) continue;
+            if (/\bbehavior\b/i.test(val) || /\b-ms-behavior\b/i.test(val)) continue;
+
+            if (/url\(/i.test(val) && !/^url\s*\(\s*#[A-Za-z0-9_-]+\s*\)$/i.test(val)) {
+                continue;
+            }
+
+            safeDecls.push(`${prop}: ${val}`);
+        }
+
+        return safeDecls.length > 0 ? safeDecls.join('; ') + ';' : '';
+    }
+
+    function getSanitizedSvgAttributes(node, isRoot = false) {
+        const result = {};
+        if (!node || node.nodeType !== 1) return result;
+
+        let rawAttrs = {};
+        if (node.attributes && typeof node.attributes === 'object') {
+            if (Array.isArray(node.attributes)) {
+                for (const attr of node.attributes) {
+                    if (attr && attr.name) rawAttrs[attr.name] = attr.value;
+                }
+            } else if (typeof node.attributes.length === 'number') {
+                for (let i = 0; i < node.attributes.length; i++) {
+                    const attr = node.attributes[i];
+                    if (attr && attr.name) rawAttrs[attr.name] = attr.value;
+                }
+            } else {
+                rawAttrs = { ...node.attributes };
+            }
+        }
+
+        for (const [attrName, rawVal] of Object.entries(rawAttrs)) {
+            if (typeof attrName !== 'string') continue;
+            const lowerName = attrName.toLowerCase();
+
+            // Strip event handlers
+            if (lowerName.startsWith('on')) continue;
+
+            // Strip active/external links and source references
+            if (
+                lowerName === 'href' ||
+                lowerName === 'xlink:href' ||
+                lowerName === 'xmlns:xlink' ||
+                lowerName === 'src' ||
+                lowerName === 'action' ||
+                lowerName === 'formaction' ||
+                lowerName === 'data' ||
+                lowerName === 'ping' ||
+                lowerName === 'poster'
+            ) {
+                continue;
+            }
+
+            if (!ALLOWED_SVG_ATTRS.has(lowerName)) continue;
+
+            const valStr = String(rawVal);
+            if (/[\u0000-\u001F\u007F-\u009F]/.test(valStr)) continue;
+            if (/javascript:|vbscript:|data:text\/html|expression\(|-moz-binding|@import/i.test(valStr)) continue;
+
+            if (lowerName === 'style') {
+                const cleanStyle = sanitizeCssStyle(valStr);
+                if (cleanStyle) {
+                    result['style'] = cleanStyle;
+                }
+            } else {
+                // Disallow external URLs in attributes (only allow safe local fragment references like url(#id))
+                if (/url\(/i.test(valStr)) {
+                    if (!/^url\s*\(\s*#[A-Za-z0-9_-]+\s*\)$/i.test(valStr)) {
+                        continue;
+                    }
+                }
+                result[attrName] = valStr;
+            }
+        }
+
+        if (isRoot) {
+            result['xmlns'] = 'http://www.w3.org/2000/svg';
+        }
+
+        return result;
+    }
+
+    function serializeSvgTree(node, budget, isRoot = false) {
+        if (!node) return '';
+
+        if (node.nodeType === 3) {
+            const text = node.nodeValue || node.textContent || '';
+            const escaped = escapeXml(text);
+            budget.bytes += escaped.length;
+            if (budget.bytes > budget.maxBytes) return null;
+            return escaped;
+        }
+
+        if (node.nodeType !== 1) return '';
+
+        const tag = getTagName(node).toLowerCase();
+        if (FORBIDDEN_SVG_TAGS.has(tag)) return '';
+        if (!ALLOWED_SVG_TAGS.has(tag)) {
+            // Unrecognized tag (e.g. unknown wrapper element or <a>). Skip the container tag but serialize safe children
+            const children = getChildNodes(node);
+            let innerStr = '';
+            for (const child of children) {
+                const childResult = serializeSvgTree(child, budget, false);
+                if (childResult === null) return null;
+                innerStr += childResult;
+            }
+            return innerStr;
+        }
+
+        if (isRoot && tag !== 'svg') return null;
+
+        const attrs = getSanitizedSvgAttributes(node, isRoot);
+        let attrStr = '';
+        for (const [k, v] of Object.entries(attrs)) {
+            attrStr += ` ${k}="${escapeXmlAttr(v)}"`;
+        }
+
+        const children = getChildNodes(node);
+        let innerStr = '';
+
+        for (const child of children) {
+            const childResult = serializeSvgTree(child, budget, false);
+            if (childResult === null) return null;
+            innerStr += childResult;
+        }
+
+        let output = '';
+        if (children.length === 0 && (tag === 'path' || tag === 'rect' || tag === 'circle' || tag === 'line' || tag === 'polyline' || tag === 'polygon' || tag === 'ellipse' || tag === 'stop')) {
+            output = `<${tag}${attrStr}/>`;
+        } else {
+            output = `<${tag}${attrStr}>${innerStr}</${tag}>`;
+        }
+
+        budget.bytes += output.length;
+        if (budget.bytes > budget.maxBytes) return null;
+        return output;
+    }
+
+    function sanitizeSvg(svgInput) {
+        if (!svgInput) return null;
+
+        let rootSvgNode = null;
+
+        if (typeof svgInput === 'string') {
+            const str = svgInput.trim();
+            if (!str || str.length > MAX_SVG_BYTES) return null;
+
+            // Reject DOCTYPE or entity declarations (prevents DTD / XML entity expansion attacks)
+            if (/<!DOCTYPE/i.test(str) || /<!ENTITY/i.test(str) || /<\?xml-stylesheet/i.test(str)) {
+                return null;
+            }
+
+            if (typeof DOMParser !== 'undefined') {
+                try {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(str, 'image/svg+xml');
+                    const parserError = doc.querySelector('parsererror');
+                    if (parserError) return null;
+                    rootSvgNode = doc.documentElement;
+                } catch {
+                    return null;
+                }
+            } else if (root && typeof root.parseHTML === 'function') {
+                try {
+                    const doc = root.parseHTML(str);
+                    rootSvgNode = doc.querySelector('svg');
+                } catch {
+                    return null;
+                }
+            } else {
+                return null;
+            }
+        } else if (typeof svgInput === 'object' && svgInput.nodeType === 1) {
+            rootSvgNode = svgInput;
+        }
+
+        if (!rootSvgNode || getTagName(rootSvgNode) !== 'SVG') {
+            return null;
+        }
+
+        const budget = { bytes: 0, maxBytes: MAX_SVG_BYTES };
+        const serialized = serializeSvgTree(rootSvgNode, budget, true);
+
+        if (!serialized || budget.bytes > MAX_SVG_BYTES) return null;
+
+        // Ensure serialized SVG is a single <svg> element with valid content
+        if (!serialized.startsWith('<svg') || !serialized.endsWith('</svg>')) {
+            return null;
+        }
+
+        return serialized;
+    }
+
+    function extractMermaidSvgElement(node) {
+        if (!node || node.nodeType !== 1) return null;
+        if (getTagName(node) === 'SVG') return node;
+        const svgs = findDescendants(node, (c) => getTagName(c) === 'SVG');
+        return svgs.length > 0 ? svgs[0] : null;
+    }
+
     function shouldExcludeElement(el) {
         if (!el || el.nodeType !== 1) return false;
         const tag = getTagName(el);
 
         if (BLACKLISTED_TAGS.has(tag)) return true;
-        if (tag === 'SVG') return true;
+        if (tag === 'SVG') {
+            // Rendered Mermaid SVGs are handled by isRenderedMermaidViewer; exclude general/loose SVGs
+            return !isRenderedMermaidViewer(el);
+        }
 
         if (getAttribute(el, 'aria-hidden') === 'true') return true;
         if (hasAttribute(el, 'hidden')) return true;
@@ -351,7 +663,7 @@
                 const tag = getTagName(child);
                 if (tag !== 'SVG') return false;
                 const id = getAttribute(child, 'id') || '';
-                return id.startsWith('claude-mermaid-') || id.includes('mermaid');
+                return id.startsWith('claude-mermaid-') || id.includes('mermaid') || true;
             });
             return svgChild.length > 0;
         }
@@ -359,7 +671,7 @@
         const tag = getTagName(node);
         if (tag === 'SVG') {
             const id = getAttribute(node, 'id') || '';
-            return id.startsWith('claude-mermaid-') || id.includes('mermaid');
+            return id.startsWith('claude-mermaid-') || id.includes('mermaid') || lowerClass.includes('mermaid');
         }
 
         return false;
@@ -709,18 +1021,37 @@
 
         if (node.nodeType !== 1) return '';
 
-        if (shouldExcludeElement(node)) return '';
-
         if (isRenderedMermaidViewer(node)) {
             const hasExplicitSource = Boolean(state.metadata.hasMermaidSource);
             if (!hasExplicitSource) {
-                state.metadata.hasSvgOnlyMermaid = true;
-                state.metadata.mermaidCount++;
-                addWarning(state, 'Mermaid source is unavailable; rendered SVG was not converted.');
-                return '> [!WARNING]\n> Mermaid source is unavailable; rendered SVG was not converted.\n\n';
+                const svgEl = extractMermaidSvgElement(node);
+                const sanitizedSvg = svgEl ? sanitizeSvg(svgEl) : null;
+                if (sanitizedSvg) {
+                    state.diagramCount++;
+                    const paddedIndex = String(state.diagramCount).padStart(2, '0');
+                    const companionFilename = `${state.baseName}-diagram-${paddedIndex}.svg`;
+                    state.svgFiles.push({
+                        filename: companionFilename,
+                        svgContent: sanitizedSvg,
+                        content: sanitizedSvg,
+                        mimeType: 'image/svg+xml'
+                    });
+                    state.metadata.hasSvgOnlyMermaid = true;
+                    state.metadata.hasSvgFallback = true;
+                    state.metadata.mermaidCount++;
+                    state.metadata.imagesCount++;
+                    return `![Diagram](${companionFilename})\n\n`;
+                } else {
+                    state.metadata.hasSvgOnlyMermaid = true;
+                    state.metadata.mermaidCount++;
+                    addWarning(state, 'Mermaid diagram SVG was malformed or unsafe and was not converted.');
+                    return '> [!WARNING]\n> Mermaid source is unavailable; rendered SVG was not converted.\n\n';
+                }
             }
             return '';
         }
+
+        if (shouldExcludeElement(node)) return '';
 
         const tag = getTagName(node);
 
@@ -804,6 +1135,7 @@
                 ok: false,
                 code: 'NO_ROOT',
                 markdown: '',
+                svgFiles: [],
                 warnings: ['Root element is missing.'],
                 metadata: {}
             };
@@ -825,16 +1157,35 @@
             return false;
         });
 
+        let docTitle = '';
+        if (typeof options.title === 'string' && options.title.trim()) {
+            docTitle = options.title.trim();
+        } else if (options.document && typeof options.document.title === 'string' && options.document.title.trim()) {
+            docTitle = options.document.title.trim();
+        } else if (typeof document !== 'undefined' && typeof document.title === 'string' && document.title.trim()) {
+            docTitle = document.title.trim();
+        }
+
+        let initialTitle = '';
+        if (docTitle && docTitle !== 'Claude' && docTitle !== 'Artifact Viewer') {
+            initialTitle = docTitle;
+        }
+
+        const baseName = sanitizeBaseName(options.baseName || initialTitle || 'artifact');
+
         const state = {
             warnings: [],
             visitedNodes: 0,
             maxNodes,
             maxDepth,
             maxChars,
+            baseName,
+            diagramCount: 0,
+            svgFiles: [],
             budgetExceeded: false,
             outputBudgetExceeded: false,
             metadata: {
-                title: '',
+                title: initialTitle,
                 headingsCount: 0,
                 codeBlocksCount: 0,
                 tablesCount: 0,
@@ -845,22 +1196,10 @@
                 mermaidCount: 0,
                 hasMermaidSource: explicitMermaidSources.length > 0,
                 hasSvgOnlyMermaid: false,
+                hasSvgFallback: false,
                 characterCount: 0
             }
         };
-
-        let docTitle = '';
-        if (typeof options.title === 'string' && options.title.trim()) {
-            docTitle = options.title.trim();
-        } else if (options.document && typeof options.document.title === 'string' && options.document.title.trim()) {
-            docTitle = options.document.title.trim();
-        } else if (typeof document !== 'undefined' && typeof document.title === 'string' && document.title.trim()) {
-            docTitle = document.title.trim();
-        }
-
-        if (docTitle && docTitle !== 'Claude' && docTitle !== 'Artifact Viewer') {
-            state.metadata.title = docTitle;
-        }
 
         let markdown = convertBlockNode(rootNode, state, 0).trim();
 
@@ -881,6 +1220,8 @@
         return {
             ok: true,
             markdown,
+            svgFiles: state.svgFiles,
+            svgArtifacts: state.svgFiles,
             warnings: state.warnings,
             metadata: state.metadata
         };
@@ -888,6 +1229,8 @@
 
     root.AygaArtifactConverter = Object.freeze({
         convertDomToMarkdown,
+        sanitizeSvg,
+        sanitizeBaseName,
         sanitizeUrl,
         isSafeUrl,
         createSafeFence,
@@ -895,6 +1238,7 @@
         shouldExcludeElement,
         MAX_MARKDOWN_CHARS,
         MAX_DOM_DEPTH,
-        MAX_DOM_NODES
+        MAX_DOM_NODES,
+        MAX_SVG_BYTES
     });
 })(typeof globalThis !== 'undefined' ? globalThis : this);

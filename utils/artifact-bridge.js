@@ -6,7 +6,7 @@
     const REQUEST_TYPE = 'EXPORT_ARTIFACT_REQUEST';
     const RESPONSE_TYPE = 'EXPORT_ARTIFACT_RESPONSE';
     const MAX_REQUEST_ID_LENGTH = 128;
-    const MAX_MESSAGE_BYTES = 64 * 1024;
+    const MAX_MESSAGE_BYTES = 512 * 1024;
     const MAX_RESULT_MESSAGE_LENGTH = 512;
 
     function isPlainObject(value) {
@@ -80,8 +80,18 @@
         return hasSafeMessageSize(response) ? response : null;
     }
 
+    function isValidSvgFile(file) {
+        if (!isPlainObject(file) || Object.keys(file).length > 5) return false;
+        if (typeof file.filename !== 'string' || file.filename.length === 0 || file.filename.length > 128) return false;
+        if (!file.filename.endsWith('.svg') || !/^[A-Za-z0-9._-]+$/.test(file.filename) || file.filename.includes('..')) return false;
+        const content = typeof file.svgContent === 'string' ? file.svgContent : file.content;
+        if (typeof content !== 'string' || content.length === 0 || content.length > 256 * 1024) return false;
+        if (file.mimeType !== undefined && (typeof file.mimeType !== 'string' || file.mimeType.length > 64)) return false;
+        return true;
+    }
+
     function isValidResult(result) {
-        if (!isPlainObject(result) || Object.keys(result).length > 8) return false;
+        if (!isPlainObject(result) || Object.keys(result).length > 12) return false;
         if (typeof result.ok !== 'boolean') return false;
         if (result.code !== undefined &&
             (typeof result.code !== 'string' || result.code.length > 64)) return false;
@@ -92,6 +102,19 @@
         if (result.warnings !== undefined && !Array.isArray(result.warnings)) return false;
         if (result.sourceAvailable !== undefined && typeof result.sourceAvailable !== 'boolean') return false;
         if (result.mermaidSourceAvailable !== undefined && typeof result.mermaidSourceAvailable !== 'boolean') return false;
+        if (result.svg !== undefined && typeof result.svg !== 'string') return false;
+        if (result.svgFiles !== undefined) {
+            if (!Array.isArray(result.svgFiles) || result.svgFiles.length > 64) return false;
+            for (const item of result.svgFiles) {
+                if (!isValidSvgFile(item)) return false;
+            }
+        }
+        if (result.svgArtifacts !== undefined) {
+            if (!Array.isArray(result.svgArtifacts) || result.svgArtifacts.length > 64) return false;
+            for (const item of result.svgArtifacts) {
+                if (!isValidSvgFile(item)) return false;
+            }
+        }
         return true;
     }
 
@@ -116,6 +139,7 @@
         getSafeFrameOrigin,
         isApprovedFrameHostname,
         isValidRequestId,
+        isValidSvgFile,
         hasSafeMessageSize,
         makeRequest,
         isValidRequest,
